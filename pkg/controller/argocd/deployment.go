@@ -757,7 +757,7 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoprojv1a1.ArgoC
 		},
 	}
 
-	deploy.Spec.Template.Spec.ServiceAccountName = "argocd-redis-ha-haproxy"
+	deploy.Spec.Template.Spec.ServiceAccountName = "argocd-redis-ha"
 
 	if err := controllerutil.SetControllerReference(cr, deploy, r.scheme); err != nil {
 		return err
@@ -948,4 +948,15 @@ func (r *ReconcileArgoCD) reconcileServerDeployment(cr *argoprojv1a1.ArgoCD) err
 		return err
 	}
 	return r.client.Create(context.TODO(), deploy)
+}
+
+// triggerRollout will update the label with the given key to trigger a new rollout of the Deployment.
+func (r *ReconcileArgoCD) triggerRollout(deployment *appsv1.Deployment, key string) error {
+	if !argoutil.IsObjectFound(r.client, deployment.Namespace, deployment.Name, deployment) {
+		log.Info(fmt.Sprintf("unable to locate deployment with name: %s", deployment.Name))
+		return nil
+	}
+
+	deployment.Spec.Template.ObjectMeta.Labels[key] = nowDefault()
+	return r.client.Update(context.TODO(), deployment)
 }

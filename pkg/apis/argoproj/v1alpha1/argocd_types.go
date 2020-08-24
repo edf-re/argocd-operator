@@ -131,6 +131,12 @@ type ArgoCDGrafanaSpec struct {
 type ArgoCDHASpec struct {
 	// Enabled will toggle HA support globally for Argo CD.
 	Enabled bool `json:"enabled"`
+
+	// RedisProxyImage is the Redis HAProxy container image.
+	RedisProxyImage string `json:"redisProxyImage,omitempty"`
+
+	// RedisProxyVersion is the Redis HAProxy container image tag.
+	RedisProxyVersion string `json:"redisProxyVersion,omitempty"`
 }
 
 // ArgoCDImportSpec defines the desired state for the ArgoCD import/restore process.
@@ -345,7 +351,7 @@ type ArgoCDSpec struct {
 	InitialRepositories string `json:"initialRepositories,omitempty"`
 
 	// InitialSSHKnownHosts defines the SSH known hosts data upon creation of the cluster for connecting Git repositories via SSH.
-	InitialSSHKnownHosts string `json:"initialSSHKnownHosts,omitempty"`
+	InitialSSHKnownHosts SSHHostsSpec `json:"initialSSHKnownHosts,omitempty"`
 
 	// KustomizeBuildOptions is used to specify build options/parameters to use with `kustomize build`.
 	KustomizeBuildOptions string `json:"kustomizeBuildOptions,omitempty"`
@@ -450,4 +456,9 @@ type ArgoCDTLSSpec struct {
 
 	// InitialCerts defines custom TLS certificates upon creation of the cluster for connecting Git repositories via HTTPS.
 	InitialCerts map[string]string `json:"initialCerts,omitempty"`
+}
+
+type SSHHostsSpec struct {
+	ExcludeDefaultHosts bool   `json:"excludedefaulthosts,omitempty"`
+	Keys                string `json:"keys,omitempty"`
 }
