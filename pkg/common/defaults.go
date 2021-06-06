@@ -15,6 +15,18 @@
 package common
 
 const (
+	// ArgoCDApplicationControllerComponent is the name of the application controller  control plane component
+	ArgoCDApplicationControllerComponent = "argocd-application-controller"
+
+	// ArgoCDServerComponent is the name of the Dex server control plane component
+	ArgoCDServerComponent = "argocd-server"
+
+	// ArgoCDRedisHAComponent is the name of the Redis control plane component
+	ArgoCDRedisHAComponent = "argocd-redis-ha"
+
+	// ArgoCDDexServerComponent is the name of the Dex server control plane component
+	ArgoCDDexServerComponent = "argocd-dex-server"
+
 	// ArgoCDDefaultAdminPasswordLength is the length of the generated default admin password.
 	ArgoCDDefaultAdminPasswordLength = 32
 
@@ -24,6 +36,12 @@ const (
 	// ArgoCDDefaultAdminPasswordNumSymbols is the number of symbols to use for the generated default admin password.
 	ArgoCDDefaultAdminPasswordNumSymbols = 0
 
+	// ArgoCDDefaultApplicationSetImage is the Argo CD Application Set container image to use when not specified.
+	ArgoCDDefaultApplicationSetImage = "quay.io/argocdapplicationset/argocd-applicationset"
+
+	// ArgoCDDefaultApplicationSetVersion is the Argo CD Application Set image tag to use when not specified.
+	ArgoCDDefaultApplicationSetVersion = "v0.1.0"
+
 	// ArgoCDDefaultApplicationInstanceLabelKey is the default app name as a tracking label.
 	ArgoCDDefaultApplicationInstanceLabelKey = "mycompany.com/appname"
 
@@ -31,7 +49,7 @@ const (
 	ArgoCDDefaultArgoImage = "argoproj/argocd"
 
 	// ArgoCDDefaultArgoVersion is the Argo CD container image digest to use when version not specified.
-	ArgoCDDefaultArgoVersion = "sha256:0a8fa1fee472568c2ec49dc1a71d3af56613b6b62353560a3682abc24492daee" // v1.6.1
+	ArgoCDDefaultArgoVersion = "sha256:8d1d58ef963f615da97e0b2c54dbe243801d5e7198b98393ab36b7a5768f72a4" // v2.0.0
 
 	// ArgoCDDefaultBackupKeyLength is the length of the generated default backup key.
 	ArgoCDDefaultBackupKeyLength = 32
@@ -80,13 +98,13 @@ const (
 	ArgoCDDefaultDexServiceAccountName = "argocd-dex-server"
 
 	// ArgoCDDefaultDexVersion is the Dex container image tag to use when not specified.
-	ArgoCDDefaultDexVersion = "sha256:01e996b4b60edcc5cc042227c6965dd63ba68764c25d86b481b0d65f6e4da308" // v2.22.0
+	ArgoCDDefaultDexVersion = "sha256:77bfea96e8d8f3e4197b9f6020c8f5dedbb701245c19afd69a15747ae4bf2804" // v2.28.0
 
 	// ArgoCDDefaultExportJobImage is the export job container image to use when not specified.
 	ArgoCDDefaultExportJobImage = "quay.io/jmckind/argocd-operator-util"
 
 	// ArgoCDDefaultExportJobVersion is the export job container image tag to use when not specified.
-	ArgoCDDefaultExportJobVersion = "sha256:91743a6f8ed9423bab5c68ee6ad2450b2d123dd52f1de836bcbb33d531778487" // v0.0.13
+	ArgoCDDefaultExportJobVersion = "sha256:dd0b52626828629ebf614ec86ed7914119e7f1efcfebcb5da52502582e0797a1" // v0.0.15
 
 	// ArgoCDDefaultExportLocalCapicity is the default capacity to use for local export.
 	ArgoCDDefaultExportLocalCapicity = "2Gi"
@@ -141,6 +159,12 @@ const (
 
 	// ArgoCDDefaultKustomizeBuildOptions is the default kustomize build options.
 	ArgoCDDefaultKustomizeBuildOptions = ""
+
+	// ArgoCDKeycloakImageName is the default Keycloak Image used when not specified.
+	ArgoCDKeycloakImageName = "sso74-openshift-rhel8"
+
+	// ArgoCDKeycloakVersion is the default Keycloak version used when not specified.
+	ArgoCDKeycloakVersion = "7.4"
 
 	// ArgoCDDefaultOIDCConfig is the default OIDC configuration.
 	ArgoCDDefaultOIDCConfig = ""
@@ -202,8 +226,11 @@ const (
 	// ArgoCDDefaultResourceCustomizations is the default resource customizations.
 	ArgoCDDefaultResourceCustomizations = ""
 
-	// ArgoCDDefaultResourceExclusions is the default resource exlcusions.
+	// ArgoCDDefaultResourceExclusions is the default resource exclusions.
 	ArgoCDDefaultResourceExclusions = ""
+
+	// ArgoCDDefaultResourceInclusions is the default resource inclusions.
+	ArgoCDDefaultResourceInclusions = ""
 
 	// ArgoCDDefaultRSAKeySize is the default RSA key size when not specified.
 	ArgoCDDefaultRSAKeySize = 2048

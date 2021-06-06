@@ -20,6 +20,9 @@ import (
 )
 
 const (
+	// ArgoCDKeyAdminEnabled is the configuration key for the admin enabled setting..
+	ArgoCDKeyAdminEnabled = "admin.enabled"
+
 	// ArgoCDKeyApplicationInstanceLabelKey is the configuration key for the application instance label.
 	ArgoCDKeyApplicationInstanceLabelKey = "application.instanceLabelKey"
 
@@ -98,6 +101,9 @@ const (
 	// ArgoCDKeyPartOf is the resource part-of key for labels.
 	ArgoCDKeyPartOf = "app.kubernetes.io/part-of"
 
+	// ArgoCDKeyManagedBy is the managed-by key for labels.
+	ArgoCDKeyManagedBy = "app.kubernetes.io/managed-by"
+
 	// ArgoCDKeyStatefulSetPodName is the resource StatefulSet Pod Name key for labels.
 	ArgoCDKeyStatefulSetPodName = "statefulset.kubernetes.io/pod-name"
 
@@ -121,6 +127,9 @@ const (
 
 	// ArgoCDKeyResourceExclusions is the configuration key for resource exclusions.
 	ArgoCDKeyResourceExclusions = "resource.exclusions"
+
+	// ArgoCDKeyResourceInclusions is the configuration key for resource inclusions.
+	ArgoCDKeyResourceInclusions = "resource.inclusions"
 
 	// ArgoCDKeyRepositories is the configuration key for repositories.
 	ArgoCDKeyRepositories = "repositories"
@@ -154,4 +163,35 @@ const (
 
 	// ArgoCDKeyUsersAnonymousEnabled is the configuration key for anonymous user access.
 	ArgoCDKeyUsersAnonymousEnabled = "users.anonymous.enabled"
+
+	// ArgoCDApplicationSetEnvName is the environment variable used to get the image
+	// for the ApplicationSet controller
+	ArgoCDApplicationSetEnvName = "ARGOCD_APPLICATIONSET_IMAGE"
+
+	// ArgoCDDexImageEnvName is the environment variable used to get the image
+	// to used for the Dex container.
+	ArgoCDDexImageEnvName = "ARGOCD_DEX_IMAGE"
+
+	// ArgoCDImageEnvName is the environment variable used to get the image
+	// to used for the argocd container.
+	ArgoCDImageEnvName = "ARGOCD_IMAGE"
+
+	// ArgoCDRedisHAProxyImageEnvName is the environment variable used to get the image
+	// to used for the Redis HA Proxy container.
+	ArgoCDRedisHAProxyImageEnvName = "ARGOCD_REDIS_HA_PROXY_IMAGE"
+
+	// ArgoCDRedisHAImageEnvName is the environment variable used to get the image
+	// to used for the the Redis container in HA mode.
+	ArgoCDRedisHAImageEnvName = "ARGOCD_REDIS_HA_IMAGE"
+
+	// ArgoCDRedisImageEnvName is the environment variable used to get the image
+	// to used for the Redis container.
+	ArgoCDRedisImageEnvName = "ARGOCD_REDIS_IMAGE"
+
+	// ArgoCDGrafanaImageEnvName is the environment variable used to get the image
+	// to used for the Grafana container.
+	ArgoCDGrafanaImageEnvName = "ARGOCD_GRAFANA_IMAGE"
+
+	// ArgoCDDeletionFinalizer is a finalizer to implement pre-delete hooks
+	ArgoCDDeletionFinalizer = "argoproj.io/finalizer"
 )

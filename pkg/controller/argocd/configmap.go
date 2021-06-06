@@ -153,7 +153,7 @@ func getRBACScopes(cr *argoprojv1a1.ArgoCD) string {
 // getResourceCustomizations will return the resource customizations for the given ArgoCD.
 func getResourceCustomizations(cr *argoprojv1a1.ArgoCD) string {
 	rc := common.ArgoCDDefaultResourceCustomizations
-	if len(cr.Spec.ResourceCustomizations) > 0 {
+	if cr.Spec.ResourceCustomizations != "" {
 		rc = cr.Spec.ResourceCustomizations
 	}
 	return rc
@@ -162,8 +162,17 @@ func getResourceCustomizations(cr *argoprojv1a1.ArgoCD) string {
 // getResourceExclusions will return the resource exclusions for the given ArgoCD.
 func getResourceExclusions(cr *argoprojv1a1.ArgoCD) string {
 	re := common.ArgoCDDefaultResourceExclusions
-	if len(cr.Spec.ResourceExclusions) > 0 {
+	if cr.Spec.ResourceExclusions != "" {
 		re = cr.Spec.ResourceExclusions
+	}
+	return re
+}
+
+// getResourceInclusions will return the resource inclusions for the given ArgoCD.
+func getResourceInclusions(cr *argoprojv1a1.ArgoCD) string {
+	re := common.ArgoCDDefaultResourceInclusions
+	if cr.Spec.ResourceInclusions != "" {
+		re = cr.Spec.ResourceInclusions
 	}
 	return re
 }
@@ -266,7 +275,7 @@ func (r *ReconcileArgoCD) reconcileConfigMaps(cr *argoprojv1a1.ArgoCD) error {
 		return err
 	}
 
-	return nil
+	return r.reconcileGPGKeysConfigMap(cr)
 }
 
 // reconcileCAConfigMap will ensure that the Certificate Authority ConfigMap is present.
@@ -303,36 +312,41 @@ func (r *ReconcileArgoCD) reconcileArgoConfigMap(cr *argoprojv1a1.ArgoCD) error 
 		return r.reconcileExistingArgoConfigMap(cm, cr)
 	}
 
-	if len(cm.Data) <= 0 {
+	if cm.Data == nil {
 		cm.Data = make(map[string]string)
 	}
 
 	cm.Data[common.ArgoCDKeyApplicationInstanceLabelKey] = getApplicationInstanceLabelKey(cr)
 	cm.Data[common.ArgoCDKeyConfigManagementPlugins] = getConfigManagementPlugins(cr)
-	cm.Data[common.ArgoCDKeyDexConfig] = getDexConfig(cr)
+	cm.Data[common.ArgoCDKeyAdminEnabled] = fmt.Sprintf("%t", !cr.Spec.DisableAdmin)
 	cm.Data[common.ArgoCDKeyGATrackingID] = getGATrackingID(cr)
 	cm.Data[common.ArgoCDKeyGAAnonymizeUsers] = fmt.Sprint(cr.Spec.GAAnonymizeUsers)
 	cm.Data[common.ArgoCDKeyHelpChatURL] = getHelpChatURL(cr)
 	cm.Data[common.ArgoCDKeyHelpChatText] = getHelpChatText(cr)
 	cm.Data[common.ArgoCDKeyKustomizeBuildOptions] = getKustomizeBuildOptions(cr)
 	cm.Data[common.ArgoCDKeyOIDCConfig] = getOIDCConfig(cr)
-	cm.Data[common.ArgoCDKeyResourceCustomizations] = getResourceCustomizations(cr)
+	if c := getResourceCustomizations(cr); c != "" {
+		cm.Data[common.ArgoCDKeyResourceCustomizations] = c
+	}
 	cm.Data[common.ArgoCDKeyResourceExclusions] = getResourceExclusions(cr)
+	cm.Data[common.ArgoCDKeyResourceInclusions] = getResourceInclusions(cr)
 	cm.Data[common.ArgoCDKeyRepositories] = getInitialRepositories(cr)
 	cm.Data[common.ArgoCDKeyRepositoryCredentials] = getRepositoryCredentials(cr)
 	cm.Data[common.ArgoCDKeyStatusBadgeEnabled] = fmt.Sprint(cr.Spec.StatusBadgeEnabled)
 	cm.Data[common.ArgoCDKeyServerURL] = r.getArgoServerURI(cr)
 	cm.Data[common.ArgoCDKeyUsersAnonymousEnabled] = fmt.Sprint(cr.Spec.UsersAnonymousEnabled)
 
-	dexConfig := getDexConfig(cr)
-	if len(dexConfig) <= 0 && cr.Spec.Dex.OpenShiftOAuth {
-		cfg, err := r.getOpenShiftDexConfig(cr)
-		if err != nil {
-			return err
+	if !isDexDisabled() {
+		dexConfig := getDexConfig(cr)
+		if dexConfig == "" && cr.Spec.Dex.OpenShiftOAuth {
+			cfg, err := r.getOpenShiftDexConfig(cr)
+			if err != nil {
+				return err
+			}
+			dexConfig = cfg
 		}
-		dexConfig = cfg
+		cm.Data[common.ArgoCDKeyDexConfig] = dexConfig
 	}
-	cm.Data[common.ArgoCDKeyDexConfig] = dexConfig
 
 	if err := controllerutil.SetControllerReference(cr, cm, r.scheme); err != nil {
 		return err
@@ -374,6 +388,11 @@ func (r *ReconcileArgoCD) reconcileDexConfiguration(cm *corev1.ConfigMap, cr *ar
 
 func (r *ReconcileArgoCD) reconcileExistingArgoConfigMap(cm *corev1.ConfigMap, cr *argoprojv1a1.ArgoCD) error {
 	changed := false
+
+	if cm.Data[common.ArgoCDKeyAdminEnabled] == fmt.Sprintf("%t", cr.Spec.DisableAdmin) {
+		cm.Data[common.ArgoCDKeyAdminEnabled] = fmt.Sprintf("%t", !cr.Spec.DisableAdmin)
+		changed = true
+	}
 
 	if cm.Data[common.ArgoCDKeyApplicationInstanceLabelKey] != cr.Spec.ApplicationInstanceLabelKey {
 		cm.Data[common.ArgoCDKeyApplicationInstanceLabelKey] = cr.Spec.ApplicationInstanceLabelKey
@@ -438,6 +457,11 @@ func (r *ReconcileArgoCD) reconcileExistingArgoConfigMap(cm *corev1.ConfigMap, c
 
 	if cm.Data[common.ArgoCDKeyUsersAnonymousEnabled] != fmt.Sprint(cr.Spec.UsersAnonymousEnabled) {
 		cm.Data[common.ArgoCDKeyUsersAnonymousEnabled] = fmt.Sprint(cr.Spec.UsersAnonymousEnabled)
+		changed = true
+	}
+
+	if cm.Data[common.ArgoCDKeyRepositoryCredentials] != cr.Spec.RepositoryCredentials {
+		cm.Data[common.ArgoCDKeyRepositoryCredentials] = cr.Spec.RepositoryCredentials
 		changed = true
 	}
 
@@ -624,12 +648,23 @@ func (r *ReconcileArgoCD) reconcileSSHKnownHosts(cr *argoprojv1a1.ArgoCD) error 
 // reconcileTLSCerts will ensure that the ArgoCD TLS Certs ConfigMap is present.
 func (r *ReconcileArgoCD) reconcileTLSCerts(cr *argoprojv1a1.ArgoCD) error {
 	cm := newConfigMapWithName(common.ArgoCDTLSCertsConfigMapName, cr)
-	if argoutil.IsObjectFound(r.client, cr.Namespace, cm.Name, cm) {
-		return nil // ConfigMap found, move along...
+	cm.Data = getInitialTLSCerts(cr)
+	if err := controllerutil.SetControllerReference(cr, cm, r.scheme); err != nil {
+		return err
 	}
 
-	cm.Data = getInitialTLSCerts(cr)
+	if argoutil.IsObjectFound(r.client, cr.Namespace, cm.Name, cm) {
+		return r.client.Update(context.TODO(), cm)
+	}
+	return r.client.Create(context.TODO(), cm)
+}
 
+// reconcileGPGKeysConfigMap creates a gpg-keys config map
+func (r *ReconcileArgoCD) reconcileGPGKeysConfigMap(cr *argoprojv1a1.ArgoCD) error {
+	cm := newConfigMapWithName(common.ArgoCDGPGKeysConfigMapName, cr)
+	if argoutil.IsObjectFound(r.client, cr.Namespace, cm.Name, cm) {
+		return nil
+	}
 	if err := controllerutil.SetControllerReference(cr, cm, r.scheme); err != nil {
 		return err
 	}

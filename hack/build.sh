@@ -16,8 +16,12 @@
 #
 # Script to build the operator from source and create a new container image.
 
+OPERATOR_SDK=${OPERATOR_SDK:-operator-sdk}
+
 HACK_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 source ${HACK_DIR}/env.sh
 
 echo "Building image ${ARGOCD_OPERATOR_IMAGE}"
-operator-sdk build ${ARGOCD_OPERATOR_IMAGE} --image-builder ${ARGOCD_OPERATOR_IMAGE_BUILDER}
+${OPERATOR_SDK} build ${ARGOCD_OPERATOR_IMAGE} ${ARGOCD_BUILD_ARGS} --image-builder ${ARGOCD_OPERATOR_IMAGE_BUILDER}
+# export ${ARGOCD_BUILD_ARGS}="--go-build-args "-tags openshift"" to add openshift package to the build process that
+# registers a reconciler hook which modifies the reconciler to create ArgoCD for Cluster Config. 

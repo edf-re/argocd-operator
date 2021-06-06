@@ -17,6 +17,7 @@ package argocd
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	argoprojv1a1 "github.com/argoproj-labs/argocd-operator/pkg/apis/argoproj/v1alpha1"
@@ -56,6 +57,23 @@ func newStatefulSetWithName(name string, component string, cr *argoprojv1a1.Argo
 	lbls[common.ArgoCDKeyComponent] = component
 	ss.ObjectMeta.Labels = lbls
 
+	ss.Spec = appsv1.StatefulSetSpec{
+		Selector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				common.ArgoCDKeyName: name,
+			},
+		},
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{
+					common.ArgoCDKeyName: name,
+				},
+			},
+		},
+	}
+
+	ss.Spec.ServiceName = name
+
 	return ss
 }
 
@@ -72,12 +90,13 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 			return r.client.Delete(context.TODO(), ss)
 		}
 
-		desiredImage := getRedisContainerImage(cr)
+		desiredImage := getRedisHAContainerImage(cr)
 		changed := false
 
-		for _, container := range ss.Spec.Template.Spec.Containers {
+		for i, container := range ss.Spec.Template.Spec.Containers {
 			if container.Image != desiredImage {
-				container.Image = getRedisHAContainerImage(cr)
+				ss.Spec.Template.Spec.Containers[i].Image = getRedisHAContainerImage(cr)
+				changed = true
 			}
 		}
 
@@ -247,7 +266,7 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 		RunAsUser:    &runAsUser,
 	}
 
-	ss.Spec.Template.Spec.ServiceAccountName = "argocd-redis-ha"
+	ss.Spec.Template.Spec.ServiceAccountName = nameWithSuffix("argocd-redis-ha", cr)
 
 	ss.Spec.Template.Spec.Volumes = []corev1.Volume{
 		{
@@ -271,6 +290,165 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 		Type: appsv1.RollingUpdateStatefulSetStrategyType,
 	}
 
+	if err := applyReconcilerHook(cr, ss, ""); err != nil {
+		return err
+	}
+
+	if err := controllerutil.SetControllerReference(cr, ss, r.scheme); err != nil {
+		return err
+	}
+	return r.client.Create(context.TODO(), ss)
+}
+
+func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoprojv1a1.ArgoCD) error {
+	var replicas int32 = 1 // TODO: allow override using CR ?
+	ss := newStatefulSetWithSuffix("application-controller", "application-controller", cr)
+	ss.Spec.Replicas = &replicas
+
+	podSpec := &ss.Spec.Template.Spec
+	podSpec.Containers = []corev1.Container{{
+		Command:         getArgoApplicationControllerCommand(cr),
+		Image:           getArgoContainerImage(cr),
+		ImagePullPolicy: corev1.PullAlways,
+		Name:            "argocd-application-controller",
+		LivenessProbe: &corev1.Probe{
+			Handler: corev1.Handler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/healthz",
+					Port: intstr.FromInt(8082),
+				},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+		},
+		Env: proxyEnvVars(),
+		Ports: []corev1.ContainerPort{
+			{
+				ContainerPort: 8082,
+			},
+		},
+		ReadinessProbe: &corev1.Probe{
+			Handler: corev1.Handler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/healthz",
+					Port: intstr.FromInt(8082),
+				},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+		},
+		Resources: getArgoApplicationControllerResources(cr),
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "argocd-repo-server-tls",
+				MountPath: "/app/config/controller/tls",
+			},
+		},
+	}}
+	podSpec.ServiceAccountName = nameWithSuffix("argocd-application-controller", cr)
+	podSpec.Volumes = []corev1.Volume{
+		{
+			Name: "argocd-repo-server-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: common.ArgoCDRepoServerTLSSecretName,
+					Optional:   boolPtr(true),
+				},
+			},
+		},
+	}
+
+	ss.Spec.Template.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							common.ArgoCDKeyName: nameWithSuffix("argocd-application-controller", cr),
+						},
+					},
+					TopologyKey: common.ArgoCDKeyHostname,
+				},
+				Weight: int32(100),
+			},
+				{
+					PodAffinityTerm: corev1.PodAffinityTerm{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								common.ArgoCDKeyPartOf: common.ArgoCDAppName,
+							},
+						},
+						TopologyKey: common.ArgoCDKeyHostname,
+					},
+					Weight: int32(5),
+				}},
+		},
+	}
+
+	// Handle import/restore from ArgoCDExport
+	export := r.getArgoCDExport(cr)
+	if export == nil {
+		log.Info("existing argocd export not found, skipping import")
+	} else {
+		podSpec.InitContainers = []corev1.Container{{
+			Command:         getArgoImportCommand(r.client, cr),
+			Env:             proxyEnvVars(getArgoImportContainerEnv(export)...),
+			Resources:       getArgoApplicationControllerResources(cr),
+			Image:           getArgoImportContainerImage(export),
+			ImagePullPolicy: corev1.PullAlways,
+			Name:            "argocd-import",
+			VolumeMounts:    getArgoImportVolumeMounts(export),
+		}}
+
+		podSpec.Volumes = getArgoImportVolumes(export)
+	}
+
+	existing := newStatefulSetWithSuffix("application-controller", "application-controller", cr)
+	if argoutil.IsObjectFound(r.client, cr.Namespace, existing.Name, existing) {
+		actualImage := existing.Spec.Template.Spec.Containers[0].Image
+		desiredImage := getArgoContainerImage(cr)
+		changed := false
+		if actualImage != desiredImage {
+			existing.Spec.Template.Spec.Containers[0].Image = desiredImage
+			existing.Spec.Template.ObjectMeta.Labels["image.upgraded"] = time.Now().UTC().Format("01022006-150406-MST")
+			changed = true
+		}
+		desiredCommand := getArgoApplicationControllerCommand(cr)
+		if isRepoServerTLSVerificationRequested(cr) {
+			desiredCommand = append(desiredCommand, "--repo-server-strict-tls")
+		}
+		if !reflect.DeepEqual(desiredCommand, existing.Spec.Template.Spec.Containers[0].Command) {
+			existing.Spec.Template.Spec.Containers[0].Command = desiredCommand
+			changed = true
+		}
+
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Env,
+			ss.Spec.Template.Spec.Containers[0].Env) {
+			existing.Spec.Template.Spec.Containers[0].Env = ss.Spec.Template.Spec.Containers[0].Env
+			changed = true
+		}
+		if !reflect.DeepEqual(ss.Spec.Template.Spec.Volumes, existing.Spec.Template.Spec.Volumes) {
+			existing.Spec.Template.Spec.Volumes = ss.Spec.Template.Spec.Volumes
+			changed = true
+		}
+		if !reflect.DeepEqual(ss.Spec.Template.Spec.Containers[0].VolumeMounts,
+			existing.Spec.Template.Spec.Containers[0].VolumeMounts) {
+			existing.Spec.Template.Spec.Containers[0].VolumeMounts = ss.Spec.Template.Spec.Containers[0].VolumeMounts
+			changed = true
+		}
+
+		if changed {
+			return r.client.Update(context.TODO(), existing)
+		}
+		return nil // StatefulSet found with nothing to do, move along...
+	}
+
+	// Delete existing deployment for Application Controller, if any ..
+	deploy := newDeploymentWithSuffix("application-controller", "application-controller", cr)
+	if argoutil.IsObjectFound(r.client, deploy.Namespace, deploy.Name, deploy) {
+		r.client.Delete(context.TODO(), deploy)
+	}
+
 	if err := controllerutil.SetControllerReference(cr, ss, r.scheme); err != nil {
 		return err
 	}
@@ -279,8 +457,22 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoprojv1a1.ArgoCD) err
 
 // reconcileStatefulSets will ensure that all StatefulSets are present for the given ArgoCD.
 func (r *ReconcileArgoCD) reconcileStatefulSets(cr *argoprojv1a1.ArgoCD) error {
+	if err := r.reconcileApplicationControllerStatefulSet(cr); err != nil {
+		return err
+	}
 	if err := r.reconcileRedisStatefulSet(cr); err != nil {
-		return nil
+		return err
 	}
 	return nil
+}
+
+// triggerStatefulSetRollout will update the label with the given key to trigger a new rollout of the StatefulSet.
+func (r *ReconcileArgoCD) triggerStatefulSetRollout(sts *appsv1.StatefulSet, key string) error {
+	if !argoutil.IsObjectFound(r.client, sts.Namespace, sts.Name, sts) {
+		log.Info(fmt.Sprintf("unable to locate deployment with name: %s", sts.Name))
+		return nil
+	}
+
+	sts.Spec.Template.ObjectMeta.Labels[key] = nowNano()
+	return r.client.Update(context.TODO(), sts)
 }

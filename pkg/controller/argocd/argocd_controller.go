@@ -16,8 +16,8 @@ package argocd
 
 import (
 	"context"
+	"fmt"
 
-	argoproj "github.com/argoproj-labs/argocd-operator/pkg/apis/argoproj/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,6 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
+
+	argoproj "github.com/argoproj-labs/argocd-operator/pkg/apis/argoproj/v1alpha1"
 )
 
 // blank assignment to verify that ReconcileArgoCD implements reconcile.Reconciler
@@ -47,7 +49,7 @@ func Add(mgr manager.Manager) error {
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
-func add(mgr manager.Manager, r reconcile.Reconciler) error {
+func add(mgr manager.Manager, r *ReconcileArgoCD) error {
 	// Create a new controller
 	c, err := controller.New("argocd-controller", mgr, controller.Options{Reconciler: r})
 	if err != nil {
@@ -55,7 +57,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Register watches for all controller resources
-	if err := watchResources(c); err != nil {
+	if err := watchResources(c, r.clusterResourceMapper, r.tlsSecretMapper); err != nil {
 		return err
 	}
 
@@ -63,8 +65,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 }
 
 // newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	return &ReconcileArgoCD{client: mgr.GetClient(), scheme: mgr.GetScheme()}
+func newReconciler(mgr manager.Manager) *ReconcileArgoCD {
+	return &ReconcileArgoCD{
+		client: mgr.GetClient(),
+		scheme: mgr.GetScheme(),
+	}
 }
 
 // Reconcile reads that state of the cluster for a ArgoCD object and makes changes based on the state read
@@ -86,6 +91,30 @@ func (r *ReconcileArgoCD) Reconcile(request reconcile.Request) (reconcile.Result
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
+		return reconcile.Result{}, err
+	}
+
+	if argocd.GetDeletionTimestamp() != nil {
+		if argocd.IsDeletionFinalizerPresent() {
+			if err := r.deleteClusterResources(argocd); err != nil {
+				return reconcile.Result{}, fmt.Errorf("failed to delete ClusterResources: %w", err)
+			}
+
+			if err := r.removeDeletionFinalizer(argocd); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+		return reconcile.Result{}, nil
+	}
+
+	if !argocd.IsDeletionFinalizerPresent() {
+		if err := r.addDeletionFinalizer(argocd); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
+	// get the latest version of argocd instance before reconciling
+	if err = r.client.Get(context.TODO(), request.NamespacedName, argocd); err != nil {
 		return reconcile.Result{}, err
 	}
 

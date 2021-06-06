@@ -16,9 +16,11 @@ package argocd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -34,8 +36,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	extv1beta1 "k8s.io/api/extensions/v1beta1"
+	v1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/source"
@@ -49,7 +55,7 @@ type DexConnector struct {
 	Type   string                 `yaml:"type"`
 }
 
-// getGrafanaAdminPassword will generate and return the admin password for Argo CD.
+// generateArgoAdminPassword will generate and return the admin password for Argo CD.
 func generateArgoAdminPassword() ([]byte, error) {
 	pass, err := password.Generate(
 		common.ArgoCDDefaultAdminPasswordLength,
@@ -73,17 +79,6 @@ func generateArgoServerSessionKey() ([]byte, error) {
 
 // getArgoApplicationControllerResources will return the ResourceRequirements for the Argo CD application controller container.
 func getArgoApplicationControllerResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
-	// resources := corev1.ResourceRequirements{
-	// 	Limits: corev1.ResourceList{
-	// 		corev1.ResourceCPU:    resource.MustParse(common.ArgoCDDefaultControllerResourceLimitCPU),
-	// 		corev1.ResourceMemory: resource.MustParse(common.ArgoCDDefaultControllerResourceLimitMemory),
-	// 	},
-	// 	Requests: corev1.ResourceList{
-	// 		corev1.ResourceCPU:    resource.MustParse(common.ArgoCDDefaultControllerResourceRequestCPU),
-	// 		corev1.ResourceMemory: resource.MustParse(common.ArgoCDDefaultControllerResourceRequestMemory),
-	// 	},
-	// }
-
 	resources := corev1.ResourceRequirements{}
 
 	// Allow override of resource requirements from CR
@@ -94,16 +89,37 @@ func getArgoApplicationControllerResources(cr *argoprojv1a1.ArgoCD) corev1.Resou
 	return resources
 }
 
+// getArgoApplicationControllerCommand will return the command for the ArgoCD Application Controller component.
+func getArgoApplicationControllerCommand(cr *argoprojv1a1.ArgoCD) []string {
+	cmd := []string{
+		"argocd-application-controller",
+		"--operation-processors", fmt.Sprint(getArgoServerOperationProcessors(cr)),
+		"--redis", getRedisServerAddress(cr),
+		"--repo-server", getRepoServerAddress(cr),
+		"--status-processors", fmt.Sprint(getArgoServerStatusProcessors(cr)),
+	}
+	if cr.Spec.Controller.AppSync != nil {
+		cmd = append(cmd, "--app-resync", strconv.FormatInt(int64(cr.Spec.Controller.AppSync.Seconds()), 10))
+	}
+	return cmd
+}
+
 // getArgoContainerImage will return the container image for ArgoCD.
 func getArgoContainerImage(cr *argoprojv1a1.ArgoCD) string {
+	defaultTag, defaultImg := false, false
 	img := cr.Spec.Image
-	if len(img) <= 0 {
+	if img == "" {
 		img = common.ArgoCDDefaultArgoImage
+		defaultImg = true
 	}
 
 	tag := cr.Spec.Version
-	if len(tag) <= 0 {
+	if tag == "" {
 		tag = common.ArgoCDDefaultArgoVersion
+		defaultTag = true
+	}
+	if e := os.Getenv(common.ArgoCDImageEnvName); e != "" && (defaultTag && defaultImg) {
+		return e
 	}
 
 	return argoutil.CombineImageTag(img, tag)
@@ -124,6 +140,10 @@ func getArgoRepoResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
 // getArgoServerInsecure returns the insecure value for the ArgoCD Server component.
 func getArgoServerInsecure(cr *argoprojv1a1.ArgoCD) bool {
 	return cr.Spec.Server.Insecure
+}
+
+func isRepoServerTLSVerificationRequested(cr *argoprojv1a1.ArgoCD) bool {
+	return cr.Spec.Repo.VerifyTLS
 }
 
 // getArgoServerGRPCHost will return the GRPC host for the given ArgoCD.
@@ -170,9 +190,14 @@ func getArgoServerResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements
 }
 
 // getArgoServerURI will return the URI for the ArgoCD server.
-// The hostname for argocd-server is from the route, ingress or service name in that order.
+// The hostname for argocd-server is from the route, ingress, an external hostname or service name in that order.
 func (r *ReconcileArgoCD) getArgoServerURI(cr *argoprojv1a1.ArgoCD) string {
 	host := nameWithSuffix("server", cr) // Default to service name
+
+	// Use the external hostname provided by the user
+	if cr.Spec.Server.Host != "" {
+		host = cr.Spec.Server.Host
+	}
 
 	// Use Ingress host if enabled
 	if cr.Spec.Server.Ingress.Enabled {
@@ -212,43 +237,41 @@ func getArgoServerStatusProcessors(cr *argoprojv1a1.ArgoCD) int32 {
 }
 
 // getDexContainerImage will return the container image for the Dex server.
+//
+// There are three possible options for configuring the image, and this is the
+// order of preference.
+//
+// 1. from the Spec, the spec.dex field has an image and version to use for
+// generating an image reference.
+// 2. from the Environment, this looks for the `ARGOCD_DEX_IMAGE` field and uses
+// that if the spec is not configured.
+// 3. the default is configured in common.ArgoCDDefaultDexVersion and
+// common.ArgoCDDefaultDexImage.
 func getDexContainerImage(cr *argoprojv1a1.ArgoCD) string {
+	defaultImg, defaultTag := false, false
 	img := cr.Spec.Dex.Image
-	if len(img) <= 0 {
+	if img == "" {
 		img = common.ArgoCDDefaultDexImage
+		defaultImg = true
 	}
 
 	tag := cr.Spec.Dex.Version
-	if len(tag) <= 0 {
+	if tag == "" {
 		tag = common.ArgoCDDefaultDexVersion
+		defaultTag = true
+	}
+	if e := os.Getenv(common.ArgoCDDexImageEnvName); e != "" && (defaultTag && defaultImg) {
+		return e
 	}
 	return argoutil.CombineImageTag(img, tag)
 }
 
-// getDexInitContainers will return the init-containers for the Dex server.
-func getDexInitContainers(cr *argoprojv1a1.ArgoCD) []corev1.Container {
-	return []corev1.Container{{
-		Command: []string{
-			"cp",
-			"/usr/local/bin/argocd-util",
-			"/shared",
-		},
-		Image:           getArgoContainerImage(cr),
-		ImagePullPolicy: corev1.PullAlways,
-		Name:            "copyutil",
-		VolumeMounts: []corev1.VolumeMount{{
-			Name:      "static-files",
-			MountPath: "/shared",
-		}},
-	}}
-}
-
 // getDexOAuthClientID will return the OAuth client ID for the given ArgoCD.
 func getDexOAuthClientID(cr *argoprojv1a1.ArgoCD) string {
-	return fmt.Sprintf("system:serviceaccount:%s:%s", cr.Namespace, common.ArgoCDDefaultDexServiceAccountName)
+	return fmt.Sprintf("system:serviceaccount:%s:%s", cr.Namespace, fmt.Sprintf("%s-%s", cr.Name, common.ArgoCDDefaultDexServiceAccountName))
 }
 
-// getDexOAuthClientID will return the OAuth client secret for the given ArgoCD.
+// getDexOAuthClientSecret will return the OAuth client secret for the given ArgoCD.
 func (r *ReconcileArgoCD) getDexOAuthClientSecret(cr *argoprojv1a1.ArgoCD) (*string, error) {
 	sa := newServiceAccountWithName(common.ArgoCDDefaultDexServiceAccountName, cr)
 	if err := argoutil.FetchObject(r.client, cr.Namespace, sa.Name, sa); err != nil {
@@ -292,14 +315,20 @@ func getDexResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
 
 // getGrafanaContainerImage will return the container image for the Grafana server.
 func getGrafanaContainerImage(cr *argoprojv1a1.ArgoCD) string {
+	defaultTag, defaultImg := false, false
 	img := cr.Spec.Grafana.Image
-	if len(img) <= 0 {
+	if img == "" {
 		img = common.ArgoCDDefaultGrafanaImage
+		defaultImg = true
 	}
 
 	tag := cr.Spec.Grafana.Version
-	if len(tag) <= 0 {
+	if tag == "" {
 		tag = common.ArgoCDDefaultGrafanaVersion
+		defaultTag = true
+	}
+	if e := os.Getenv(common.ArgoCDGrafanaImageEnvName); e != "" && (defaultTag && defaultImg) {
+		return e
 	}
 	return argoutil.CombineImageTag(img, tag)
 }
@@ -369,48 +398,64 @@ func getRedisConf(cr *argoprojv1a1.ArgoCD) string {
 
 // getRedisContainerImage will return the container image for the Redis server.
 func getRedisContainerImage(cr *argoprojv1a1.ArgoCD) string {
+	defaultImg, defaultTag := false, false
 	img := cr.Spec.Redis.Image
-	if len(img) <= 0 {
+	if img == "" {
 		img = common.ArgoCDDefaultRedisImage
+		defaultImg = true
 	}
-
 	tag := cr.Spec.Redis.Version
-	if len(tag) <= 0 {
+	if tag == "" {
 		tag = common.ArgoCDDefaultRedisVersion
+		defaultTag = true
+	}
+	if e := os.Getenv(common.ArgoCDRedisImageEnvName); e != "" && (defaultTag && defaultImg) {
+		return e
 	}
 	return argoutil.CombineImageTag(img, tag)
 }
 
 // getRedisHAContainerImage will return the container image for the Redis server in HA mode.
 func getRedisHAContainerImage(cr *argoprojv1a1.ArgoCD) string {
+	defaultImg, defaultTag := false, false
 	img := cr.Spec.Redis.Image
-	if len(img) <= 0 {
+	if img == "" {
 		img = common.ArgoCDDefaultRedisImage
+		defaultImg = true
 	}
-
 	tag := cr.Spec.Redis.Version
-	if len(tag) <= 0 {
+	if tag == "" {
 		tag = common.ArgoCDDefaultRedisVersionHA
+		defaultTag = true
+	}
+	if e := os.Getenv(common.ArgoCDRedisHAImageEnvName); e != "" && (defaultTag && defaultImg) {
+		return e
 	}
 	return argoutil.CombineImageTag(img, tag)
 }
 
 // getRedisHAProxyAddress will return the Redis HA Proxy service address for the given ArgoCD.
 func getRedisHAProxyAddress(cr *argoprojv1a1.ArgoCD) string {
-	suffix := fmt.Sprintf("redis-ha-haproxy:%v", common.ArgoCDDefaultRedisPort)
-	return nameWithSuffix(suffix, cr)
+	return fqdnServiceRef("redis-ha-haproxy", common.ArgoCDDefaultRedisPort, cr)
 }
 
 // getRedisHAProxyContainerImage will return the container image for the Redis HA Proxy.
 func getRedisHAProxyContainerImage(cr *argoprojv1a1.ArgoCD) string {
+	defaultImg, defaultTag := false, false
 	img := cr.Spec.HA.RedisProxyImage
 	if len(img) <= 0 {
 		img = common.ArgoCDDefaultRedisHAProxyImage
+		defaultImg = true
 	}
 
 	tag := cr.Spec.HA.RedisProxyVersion
 	if len(tag) <= 0 {
 		tag = common.ArgoCDDefaultRedisHAProxyVersion
+		defaultTag = true
+	}
+
+	if e := os.Getenv(common.ArgoCDRedisHAProxyImageEnvName); e != "" && (defaultTag && defaultImg) {
+		return e
 	}
 
 	return argoutil.CombineImageTag(img, tag)
@@ -476,6 +521,18 @@ func getRedisResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
 	return resources
 }
 
+// getRedisHAProxyResources will return the ResourceRequirements for the Redis HA Proxy.
+func getRedisHAProxyResources(cr *argoprojv1a1.ArgoCD) corev1.ResourceRequirements {
+	resources := corev1.ResourceRequirements{}
+
+	// Allow override of resource requirements from CR
+	if cr.Spec.HA.Resources != nil {
+		resources = *cr.Spec.HA.Resources
+	}
+
+	return resources
+}
+
 // getRedisSentinelConf will load the redis sentinel configuration from a template on disk for the given ArgoCD.
 // If an error occurs, an empty string value will be returned.
 func getRedisSentinelConf(cr *argoprojv1a1.ArgoCD) string {
@@ -493,9 +550,7 @@ func getRedisServerAddress(cr *argoprojv1a1.ArgoCD) string {
 	if cr.Spec.HA.Enabled {
 		return getRedisHAProxyAddress(cr)
 	}
-
-	suffix := fmt.Sprintf("%s:%v", common.ArgoCDDefaultRedisSuffix, common.ArgoCDDefaultRedisPort)
-	return nameWithSuffix(suffix, cr)
+	return fqdnServiceRef(common.ArgoCDDefaultRedisSuffix, common.ArgoCDDefaultRedisPort, cr)
 }
 
 // loadTemplateFile will parse a template with the given path and execute it with the given params.
@@ -522,6 +577,12 @@ func nameWithSuffix(suffix string, cr *argoprojv1a1.ArgoCD) string {
 	return fmt.Sprintf("%s-%s", cr.Name, suffix)
 }
 
+// fqdnServiceRef will return the FQDN referencing a specific service name, as set up by the operator, with the
+// given port.
+func fqdnServiceRef(service string, port int, cr *argoprojv1a1.ArgoCD) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", nameWithSuffix(service, cr), cr.Namespace, port)
+}
+
 // InspectCluster will verify the availability of extra features available to the cluster, such as Prometheus and
 // OpenShift Routes.
 func InspectCluster() error {
@@ -530,6 +591,10 @@ func InspectCluster() error {
 	}
 
 	if err := verifyRouteAPI(); err != nil {
+		return err
+	}
+
+	if err := verifyTemplateAPI(); err != nil {
 		return err
 	}
 	return nil
@@ -553,6 +618,16 @@ func (r *ReconcileArgoCD) reconcileCertificateAuthority(cr *argoprojv1a1.ArgoCD)
 func (r *ReconcileArgoCD) reconcileResources(cr *argoprojv1a1.ArgoCD) error {
 	log.Info("reconciling status")
 	if err := r.reconcileStatus(cr); err != nil {
+		return err
+	}
+
+	log.Info("reconciling roles")
+	if _, err := r.reconcileRoles(cr); err != nil {
+		return err
+	}
+
+	log.Info("reconciling rolebindings")
+	if err := r.reconcileRoleBindings(cr); err != nil {
 		return err
 	}
 
@@ -627,7 +702,92 @@ func (r *ReconcileArgoCD) reconcileResources(cr *argoprojv1a1.ArgoCD) error {
 		}
 	}
 
+	if cr.Spec.ApplicationSet != nil {
+		log.Info("reconciling ApplicationSet controller")
+		if err := r.reconcileApplicationSetController(cr); err != nil {
+			return err
+		}
+	}
+
+	if err := r.reconcileRepoServerTLSSecret(cr); err != nil {
+		return err
+	}
+
+	if cr.Spec.SSO != nil {
+		log.Info("reconciling SSO")
+		if err := r.reconcileSSO(cr); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func (r *ReconcileArgoCD) deleteClusterResources(cr *argoprojv1a1.ArgoCD) error {
+	selector, err := argocdInstanceSelector(cr.Name)
+	if err != nil {
+		return err
+	}
+
+	clusterRoleList := &v1.ClusterRoleList{}
+	if err := filterObjectsBySelector(r.client, clusterRoleList, selector); err != nil {
+		return fmt.Errorf("failed to filter ClusterRoles for %s: %w", cr.Name, err)
+	}
+
+	if err := deleteClusterRoles(r.client, clusterRoleList); err != nil {
+		return err
+	}
+
+	clusterBindingsList := &v1.ClusterRoleBindingList{}
+	if err := filterObjectsBySelector(r.client, clusterBindingsList, selector); err != nil {
+		return fmt.Errorf("failed to filter ClusterRoleBindings for %s: %w", cr.Name, err)
+	}
+
+	if err := deleteClusterRoleBindings(r.client, clusterBindingsList); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func filterObjectsBySelector(c client.Client, objectList runtime.Object, selector labels.Selector) error {
+	return c.List(context.TODO(), objectList, client.MatchingLabelsSelector{Selector: selector})
+}
+
+func argocdInstanceSelector(name string) (labels.Selector, error) {
+	selector := labels.NewSelector()
+	requirement, err := labels.NewRequirement(common.ArgoCDKeyManagedBy, selection.Equals, []string{name})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create a requirement for %w", err)
+	}
+	return selector.Add(*requirement), nil
+}
+
+func (r *ReconcileArgoCD) removeDeletionFinalizer(argocd *argoprojv1a1.ArgoCD) error {
+	argocd.Finalizers = removeString(argocd.GetFinalizers(), common.ArgoCDDeletionFinalizer)
+	if err := r.client.Update(context.TODO(), argocd); err != nil {
+		return fmt.Errorf("failed to remove deletion finalizer from %s: %w", argocd.Name, err)
+	}
+	return nil
+}
+
+func (r *ReconcileArgoCD) addDeletionFinalizer(argocd *argoprojv1a1.ArgoCD) error {
+	argocd.Finalizers = append(argocd.Finalizers, common.ArgoCDDeletionFinalizer)
+	if err := r.client.Update(context.TODO(), argocd); err != nil {
+		return fmt.Errorf("failed to add deletion finalizer for %s: %w", argocd.Name, err)
+	}
+	return nil
+}
+
+func removeString(slice []string, s string) []string {
+	var result []string
+	for _, item := range slice {
+		if item == s {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 // labelsForCluster returns the labels for all cluster resources.
@@ -639,14 +799,17 @@ func labelsForCluster(cr *argoprojv1a1.ArgoCD) map[string]string {
 	return labels
 }
 
-// setDefaults sets the default vaules for the spec and returns true if the spec was changed.
-func setDefaults(cr *argoprojv1a1.ArgoCD) bool {
-	changed := false
-	return changed
+// annotationsForCluster returns the annotations for all cluster resources.
+func annotationsForCluster(cr *argoprojv1a1.ArgoCD) map[string]string {
+	annotations := argoutil.DefaultAnnotations(cr)
+	for key, val := range cr.ObjectMeta.Annotations {
+		annotations[key] = val
+	}
+	return annotations
 }
 
 // watchResources will register Watches for each of the supported Resources.
-func watchResources(c controller.Controller) error {
+func watchResources(c controller.Controller, clusterResourceMapper handler.ToRequestsFunc, tlsSecretMapper handler.ToRequestsFunc) error {
 	// Watch for changes to primary resource ArgoCD
 	if err := c.Watch(&source.Kind{Type: &argoprojv1a1.ArgoCD{}}, &handler.EnqueueRequestForObject{}); err != nil {
 		return err
@@ -677,9 +840,44 @@ func watchResources(c controller.Controller) error {
 		return err
 	}
 
+	if err := watchOwnedResource(c, &v1.Role{}); err != nil {
+		return err
+	}
+
+	if err := watchOwnedResource(c, &v1.RoleBinding{}); err != nil {
+		return err
+	}
+
+	clusterResourceHandler := &handler.EnqueueRequestsFromMapFunc{
+		ToRequests: clusterResourceMapper,
+	}
+
+	tlsSecretHandler := &handler.EnqueueRequestsFromMapFunc{
+		ToRequests: tlsSecretMapper,
+	}
+
+	if err := c.Watch(&source.Kind{Type: &v1.ClusterRoleBinding{}}, clusterResourceHandler); err != nil {
+		return err
+	}
+
+	if err := c.Watch(&source.Kind{Type: &v1.ClusterRole{}}, clusterResourceHandler); err != nil {
+		return err
+	}
+
+	// Watch for secrets of type TLS that might be created by external processes
+	if err := c.Watch(&source.Kind{Type: &corev1.Secret{Type: corev1.SecretTypeTLS}}, tlsSecretHandler); err != nil {
+		return err
+	}
+
 	// Watch for changes to Secret sub-resources owned by ArgoCD instances.
 	if err := watchOwnedResource(c, &appsv1.StatefulSet{}); err != nil {
 		return err
+	}
+
+	// Inspect cluster to verify availability of extra features
+	// This sets the flags that are used in subsequent checks
+	if err := InspectCluster(); err != nil {
+		log.Info("unable to inspect cluster")
 	}
 
 	if IsRouteAPIAvailable() {
@@ -718,4 +916,22 @@ func withClusterLabels(cr *argoprojv1a1.ArgoCD, addLabels map[string]string) map
 		labels[key] = val
 	}
 	return labels
+}
+
+// boolPtr returns a pointer to val
+func boolPtr(val bool) *bool {
+	return &val
+}
+
+// triggerRollout will trigger a rollout of a Kubernetes resource specified as
+// obj. It currently supports Deployment and StatefulSet resources.
+func (r *ReconcileArgoCD) triggerRollout(obj interface{}, key string) error {
+	switch res := obj.(type) {
+	case *appsv1.Deployment:
+		return r.triggerDeploymentRollout(res, key)
+	case *appsv1.StatefulSet:
+		return r.triggerStatefulSetRollout(res, key)
+	default:
+		return fmt.Errorf("resource of unknown type %T, cannot trigger rollout", res)
+	}
 }

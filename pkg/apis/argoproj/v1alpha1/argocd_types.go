@@ -15,6 +15,7 @@
 package v1alpha1
 
 import (
+	"github.com/argoproj-labs/argocd-operator/pkg/common"
 	routev1 "github.com/openshift/api/route/v1"
 
 	autoscaling "k8s.io/api/autoscaling/v1"
@@ -58,6 +59,27 @@ type ArgoCDApplicationControllerSpec struct {
 	Processors ArgoCDApplicationControllerProcessorsSpec `json:"processors,omitempty"`
 
 	// Resources defines the Compute Resources required by the container for the Application Controller.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// AppSync is used to control the sync frequency, by default the ArgoCD
+	// controller polls Git every 3m by default.
+	//
+	// Set this to a duration, e.g. 10m or 600s to control the synchronisation
+	// frequency.
+	// +optional
+	AppSync *metav1.Duration `json:"appSync,omitempty"`
+}
+
+// ArgoCDApplicationSet defines whether the Argo CD ApplicationSet controller should be installed.
+type ArgoCDApplicationSet struct {
+
+	// Image is the Argo CD ApplicationSet image (optional)
+	Image string `json:"image,omitempty"`
+
+	// Version is the Argo CD ApplicationSet image tag. (optional)
+	Version string `json:"version,omitempty"`
+
+	// Resources defines the Compute Resources required by the container for ApplicationSet.
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
@@ -137,6 +159,9 @@ type ArgoCDHASpec struct {
 
 	// RedisProxyVersion is the Redis HAProxy container image tag.
 	RedisProxyVersion string `json:"redisProxyVersion,omitempty"`
+
+	// Resources defines the Compute Resources required by the container for HA.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ArgoCDImportSpec defines the desired state for the ArgoCD import/restore process.
@@ -237,6 +262,14 @@ type ArgoCDRepoSpec struct {
 
 	// ServiceAccount defines the ServiceAccount user that you would like the Repo server to use
 	ServiceAccount string `json:"serviceaccount,omitempty"`
+
+	// VerifyTLS defines whether repo server API should be accessed using strict TLS validation
+	VerifyTLS bool `json:"verifytls,omitempty"`
+
+	// AutoTLS specifies the method to use for automatic TLS configuration for the repo server
+	// The value specified here can currently be:
+	// - openshift - Use the OpenShift service CA to request TLS config
+	AutoTLS string `json:"autotls,omitempty"`
 }
 
 // ArgoCDRouteSpec defines the desired state for an OpenShift Route.
@@ -308,9 +341,28 @@ type ArgoCDServerServiceSpec struct {
 	Type corev1.ServiceType `json:"type"`
 }
 
+// SSOProviderType string defines the type of SSO provider.
+type SSOProviderType string
+
+const (
+	// SSOProviderTypeKeycloak means keycloak will be Installed and Integrated with Argo CD. A new realm with name argocd
+	// will be created in this keycloak. This realm will have a client with name argocd that uses OpenShift v4 as Identity Provider.
+	SSOProviderTypeKeycloak SSOProviderType = "keycloak"
+)
+
+// ArgoCDSSOSpec defines SSO provider.
+type ArgoCDSSOSpec struct {
+	// Provider installs and configures the given SSO Provider with Argo CD.
+	Provider SSOProviderType `json:"provider,omitempty"`
+}
+
 // ArgoCDSpec defines the desired state of ArgoCD
 // +k8s:openapi-gen=true
 type ArgoCDSpec struct {
+
+	// ArgoCDApplicationSet defines whether the Argo CD ApplicationSet controller should be installed.
+	ApplicationSet *ArgoCDApplicationSet `json:"applicationSet,omitempty"`
+
 	// ApplicationInstanceLabelKey is the key name where Argo CD injects the app name as a tracking label.
 	ApplicationInstanceLabelKey string `json:"applicationInstanceLabelKey,omitempty"`
 
@@ -322,6 +374,9 @@ type ArgoCDSpec struct {
 
 	// Dex defines the Dex server options for ArgoCD.
 	Dex ArgoCDDexSpec `json:"dex,omitempty"`
+
+	// DisableAdmin will disable the admin user.
+	DisableAdmin bool `json:"disableAdmin,omitempty"`
 
 	// GATrackingID is the google analytics tracking ID to use.
 	GATrackingID string `json:"gaTrackingID,omitempty"`
@@ -380,8 +435,15 @@ type ArgoCDSpec struct {
 	// ResourceExclusions is used to completely ignore entire classes of resource group/kinds.
 	ResourceExclusions string `json:"resourceExclusions,omitempty"`
 
+	// ResourceInclusions is used to only include specific group/kinds in the
+	// reconciliation process.
+	ResourceInclusions string `json:"resourceInclusions,omitempty"`
+
 	// Server defines the options for the ArgoCD Server component.
 	Server ArgoCDServerSpec `json:"server,omitempty"`
+
+	// SSO defines the Single Sign-on configuration for Argo CD
+	SSO *ArgoCDSSOSpec `json:"sso,omitempty"`
 
 	// StatusBadgeEnabled toggles application status badge feature.
 	StatusBadgeEnabled bool `json:"statusBadgeEnabled,omitempty"`
@@ -447,6 +509,9 @@ type ArgoCDStatus struct {
 	// Failed: At least one of the  Argo CD server component Pods had a failure.
 	// Unknown: For some reason the state of the Argo CD server component could not be obtained.
 	Server string `json:"server,omitempty"`
+
+	// RepoTLSChecksum contains the SHA256 checksum of the latest known state of tls.crt and tls.key in the argocd-repo-server-tls secret.
+	RepoTLSChecksum string `json:"repoTLSChecksum,omitempty"`
 }
 
 // ArgoCDTLSSpec defines the TLS options for ArgCD.
@@ -459,6 +524,21 @@ type ArgoCDTLSSpec struct {
 }
 
 type SSHHostsSpec struct {
-	ExcludeDefaultHosts bool   `json:"excludedefaulthosts,omitempty"`
-	Keys                string `json:"keys,omitempty"`
+	// ExcludeDefaultHosts describes whether you would like to include the default
+	// list of SSH Known Hosts provided by ArgoCD.
+	ExcludeDefaultHosts bool `json:"excludedefaulthosts,omitempty"`
+
+	// Keys describes a custom set of SSH Known Hosts that you would like to
+	// have included in your ArgoCD server.
+	Keys string `json:"keys,omitempty"`
+}
+
+// IsDeletionFinalizerPresent checks if the instance has deletion finalizer
+func (argocd *ArgoCD) IsDeletionFinalizerPresent() bool {
+	for _, finalizer := range argocd.GetFinalizers() {
+		if finalizer == common.ArgoCDDeletionFinalizer {
+			return true
+		}
+	}
+	return false
 }

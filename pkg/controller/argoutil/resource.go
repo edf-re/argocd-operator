@@ -22,6 +22,7 @@ import (
 	argoprojv1a1 "github.com/argoproj-labs/argocd-operator/pkg/apis/argoproj/v1alpha1"
 	"github.com/argoproj-labs/argocd-operator/pkg/common"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -67,8 +68,17 @@ func CreateEvent(client client.Client, action string, message string, reason str
 // DefaultLabels returns the default set of labels for controllers.
 func DefaultLabels(name string) map[string]string {
 	return map[string]string{
-		common.ArgoCDKeyName:   name,
-		common.ArgoCDKeyPartOf: common.ArgoCDAppName,
+		common.ArgoCDKeyName:      name,
+		common.ArgoCDKeyPartOf:    common.ArgoCDAppName,
+		common.ArgoCDKeyManagedBy: name,
+	}
+}
+
+// DefaultAnnotations returns the default set of annotations for child resources of ArgoCD
+func DefaultAnnotations(cr *argoprojv1a1.ArgoCD) map[string]string {
+	return map[string]string{
+		common.AnnotationName:      cr.Name,
+		common.AnnotationNamespace: cr.Namespace,
 	}
 }
 
@@ -90,10 +100,7 @@ func FetchStorageSecretName(export *argoprojv1a1.ArgoCDExport) string {
 // IsObjectFound will perform a basic check that the given object exists via the Kubernetes API.
 // If an error occurs as part of the check, the function will return false.
 func IsObjectFound(client client.Client, namespace string, name string, obj runtime.Object) bool {
-	if err := FetchObject(client, namespace, name, obj); err != nil {
-		return false
-	}
-	return true
+	return !apierrors.IsNotFound(FetchObject(client, namespace, name, obj))
 }
 
 // NameWithSuffix will return a string using the Name from the given ObjectMeta with the provded suffix appended.

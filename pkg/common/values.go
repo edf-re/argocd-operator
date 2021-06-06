@@ -26,6 +26,9 @@ const (
 	// ArgoCDConfigMapName is the upstream hard-coded ArgoCD ConfigMap name.
 	ArgoCDConfigMapName = "argocd-cm"
 
+	// ArgoCDGPGKeysConfigMapName is the upstream hard-coded ArgoCD gpg-keys ConfigMap name.
+	ArgoCDGPGKeysConfigMapName = "argocd-gpg-keys-cm"
+
 	// ArgoCDDuration365Days is a duration representing 365 days.
 	ArgoCDDuration365Days = time.Hour * 24 * 365
 
@@ -70,4 +73,7 @@ const (
 
 	// ArgoCDTLSCertsConfigMapName is the upstream hard-coded TLS certificate data ConfigMap name.
 	ArgoCDTLSCertsConfigMapName = "argocd-tls-certs-cm"
+
+	// ArgoCDRepoServerTLSSecretName is the name of the TLS secret for the repo-server
+	ArgoCDRepoServerTLSSecretName = "argocd-repo-server-tls"
 )

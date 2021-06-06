@@ -12,16 +12,18 @@ The ArgoCD Custom Resource consists of the following properties.
 Name | Default | Description
 --- | --- | ---
 [**ApplicationInstanceLabelKey**](#application-instance-label-key) | `mycompany.com/appname` |  The metadata.label key name where Argo CD injects the app name as a tracking label.
+[**ApplicationSet**](#applicationset-controller-options) | [Object] | ApplicationSet controller configuration options.
 [**ConfigManagementPlugins**](#config-management-plugins) | [Empty] | Configuration to add a config management plugin.
 [**Controller**](#controller-options) | [Object] | Argo CD Application Controller options.
 [**Dex**](#dex-options) | [Object] | Dex configuration options.
+[**DisableAdmin**](#disable-admin) | `false` | Disable the admin user.
 [**GATrackingID**](#ga-tracking-id) | [Empty] | The google analytics tracking ID to use.
 [**GAAnonymizeUsers**](#ga-anonymize-users) | `false` | Enable hashed usernames sent to google analytics.
 [**Grafana**](#grafana-options) | [Object] | Grafana configuration options.
 [**HA**](#ha-options) | [Object] | High Availability options.
 [**HelpChatURL**](#help-chat-url) | `https://mycorp.slack.com/argo-cd` | URL for getting chat help, this will typically be your Slack channel for support.
 [**HelpChatText**](#help-chat-text) | `Chat now!` | The text for getting chat help.
-[**Image**](#image) | `argoproj/argocd` | The container image for all Argo CD components.
+[**Image**](#image) | `argoproj/argocd` | The container image for all Argo CD components. This overrides the `ARGOCD_IMAGE` environment variable.
 [**Import**](#import-options) | [Object] | Import configuration options.
 [**Ingress**](#ingress-options) | [Object] | Ingress configuration options.
 [**InitialRepositories**](#initial-repositories) | [Empty] | Initial git repositories to configure Argo CD to use upon creation of the cluster.
@@ -34,11 +36,13 @@ Name | Default | Description
 [**Redis**](#redis-options) | [Object] | Redis configuration options.
 [**ResourceCustomizations**](#resource-customizations) | [Empty] | Customize resource behavior.
 [**ResourceExclusions**](#resource-exclusions) | [Empty] | The configuration to completely ignore entire classes of resource group/kinds.
+[**ResourceInclusions**](#resource-inclusions) | [Empty] | The configuration to configure which resource group/kinds are applied.
 [**Server**](#server-options) | [Object] | Argo CD Server configuration options.
+[**SSO**](#single-sign-on-options) | [Object] | Single sign-on options.
 [**StatusBadgeEnabled**](#status-badge-enabled) | `true` | Enable application status badge feature.
 [**TLS**](#tls-options) | [Object] | TLS configuration options.
 [**UsersAnonymousEnabled**](#users-anonymous-enabled) | `true` | Enable anonymous user access.
-[**Version**](#version) | v1.6.1 (SHA) | The tag to use with the container image for all Argo CD components.
+[**Version**](#version) | v1.7.7 (SHA) | The tag to use with the container image for all Argo CD components.
 
 ## Application Instance Label Key
 
@@ -60,6 +64,31 @@ metadata:
 spec:
   applicationInstanceLabelKey: mycompany.com/appname
 ```
+
+## ApplicationSet Controller Options
+
+The following properties are available for configuring the ApplicationSet controller component.
+
+Name | Default | Description
+--- | --- | ---
+Image | `quay.io/argocdapplicationset/argocd-applicationset` | The container image for the ApplicationSet controller. This overrides the `ARGOCD_APPLICATIONSET_IMAGE` environment variable.
+Version | *(recent ApplicationSet version)* | The tag to use with the ApplicationSet container image.
+
+### ApplicationSet Controller Example
+
+The following example shows all properties set to the default values.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: applicationset
+spec:
+  applicationSet: {}
+```
+
 
 ## Config Management Plugins
 
@@ -121,7 +150,7 @@ The following properties are available for configuring the Dex component.
 Name | Default | Description
 --- | --- | ---
 Config | [Empty] | The `dex.config` property in the `argocd-cm` ConfigMap.
-Image | `quay.io/dexidp/dex` | The container image for Dex.
+Image | `quay.io/dexidp/dex` | The container image for Dex. This overrides the `ARGOCD_DEX_IMAGE` environment variable.
 OpenShiftOAuth | false | Enable automatic configuration of OpenShift OAuth authentication for the Dex server. This is ignored if a value is presnt for `Dex.Config`.
 Resources | [Empty] | The container compute resources.
 Version | v2.21.0 (SHA) | The tag to use with the Dex container image.
@@ -161,14 +190,43 @@ metadata:
     example: openshift-oauth
 spec:
   dex:
-    image: quay.io/redhat-cop/dex
     openShiftOAuth: true
-    version: v2.22.0-openshift
   rbac:
     defaultPolicy: 'role:readonly'
     policy: |
-      g, system:cluster-admins, role:admin
+      g, cluster-admins, role:admin
     scopes: '[groups]'
+```
+
+### Important Note regarding Role Mappings:
+
+To have a specific user be properly atrributed with the `role:admin` upon SSO through Openshift, the user needs to be in a **group** with the `cluster-admin` role added. If the user only has a direct `ClusterRoleBinding` to the Openshift role for `cluster-admin`, the ArgoCD role will not map. 
+
+A quick fix will be to create an `cluster-admins` group, add the user to the group and then apply the `cluster-admin` ClusterRole to the group.
+
+```
+oc adm groups new cluster-admins
+oc adm groups add-users cluster-admins USER
+oc adm policy add-cluster-role-to-group cluster-admin cluster-admins
+```
+
+## Disable Admin
+
+Disable the admin user. This property maps directly to the `admin.enabled` field in the `argocd-cm` ConfigMap.
+
+### Disable Admin Example
+
+The following example disables the admin user using the `DisableAdmin` property on the `ArgoCD` resource.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: disable-admin
+spec:
+  disableAdmin: true
 ```
 
 ## GA Tracking ID
@@ -217,7 +275,7 @@ Name | Default | Description
 --- | --- | ---
 Enabled | false | Toggle Grafana support globally for ArgoCD.
 Host | `example-argocd-grafana` | The hostname to use for Ingress/Route resources.
-Image | `grafana/grafana` | The container image for Grafana.
+Image | `grafana/grafana` | The container image for Grafana. This overrides the `ARGOCD_GRAFANA_IMAGE` environment variable.
 [Ingress](#grafana-ingress-options) | [Object] | Ingress configuration for Grafana.
 Resources | [Empty] | The container compute resources.
 [Route](#grafana-route-options) | [Object] | Route configuration options.
@@ -278,7 +336,7 @@ The following properties are available for configuring High Availability for the
 Name | Default | Description
 --- | --- | ---
 Enabled | `false` | Toggle High Availability support globally for Argo CD.
-RedisProxyImage | `haproxy` | The Redis HAProxy container image.
+RedisProxyImage | `haproxy` | The Redis HAProxy container image. This overrides the `ARGOCD_REDIS_HA_PROXY_IMAGE`environment variable.
 RedisProxyVersion | `2.0.4` | The tag to use for the Redis HAProxy container image.
 
 ### HA Example
@@ -453,7 +511,7 @@ spec:
 
 Git repository credential templates to configure Argo CD to use upon creation of the cluster.
 
-This property maps directly to the `repository.credentials` field in the `argocd-cm` ConfigMap. Updating this property after the cluster has been created has no affect and should be used only as a means to initialize the cluster with the value provided. Modifications to the `repository.credentials` field should then be made through the Argo CD web UI or CLI.
+This property maps directly to the `repository.credentials` field in the `argocd-cm` ConfigMap.
 
 ### Repository Credentials Example
 
@@ -644,7 +702,7 @@ The following properties are available for configuring the Redis component.
 
 Name | Default | Description
 --- | --- | ---
-Image | `redis` | The container image for Redis.
+Image | `redis` | The container image for Redis. This overrides the `ARGOCD_REDIS_IMAGE` environment variable.
 Resources | [Empty] | The container compute resources.
 Version | 5.0.3 (SHA) | The tag to use with the Redis container image.
 
@@ -675,6 +733,8 @@ Name | Default | Description
 Resources | [Empty] | The container compute resources.
 MountSAToken | false | Whether the ServiceAccount token should be mounted to the repo-server pod.
 ServiceAccount | "" | The name of the ServiceAccount to use with the repo-server pod.
+VerifyTLS | false | Whether to enforce strict TLS checking on all components when communicating with repo server
+AutoTLS | "" | Provider to use for setting up TLS the repo-server's gRPC TLS certificate (one of: `openshift`). Currently only available for OpenShift.
 
 ### Repo Example
 
@@ -692,6 +752,8 @@ spec:
     resources: {}
     mountsatoken: false
     serviceaccount: ""
+    verifytls: false
+    autotls: ""
 ```
 
 ## Resource Customizations
@@ -763,6 +825,54 @@ spec:
       - Snapshot
       clusters:
       - "*.local"
+```
+
+### Resource Exclusions Example
+
+The following example sets a value in the `argocd-cm` ConfigMap using the `ResourceExclusions` property on the `ArgoCD` resource.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: resource-exclusions
+spec:
+  resourceExclusions: |
+    - apiGroups:
+      - repositories.stash.appscode.com
+      kinds:
+      - Snapshot
+      clusters:
+      - "*.local"
+```
+
+## Resource Inclusions
+
+In addition to exclusions, you might configure the list of included resources using the resourceInclusions setting.
+
+By default, all resource group/kinds are included. The resourceInclusions setting allows customizing the list of included group/kinds.
+
+### Resource Inclusions Example
+
+The following example sets a value in the `argocd-cm` ConfigMap using the `ResourceInclusions` property on the `ArgoCD` resource.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: resource-inclusion
+spec:
+  resourceInclusions: |
+    - apiGroups:
+      - "*"
+      kinds:
+      - Deployment
+      clusters:
+      - https://192.168.0.20
 ```
 
 ## Server Options
@@ -867,7 +977,7 @@ spec:
       annotations: {}
       enabled: false
       path: /
-      TLS:
+      tls:
         insecureEdgeTerminationPolicy: Redirect
         termination: passthrough
       wildcardPolicy: None
@@ -892,6 +1002,30 @@ metadata:
     example: status-badge-enabled
 spec:
   statusBadgeEnabled: true
+```
+
+## Single sign-on Options
+
+The following properties are available for configuring the Single sign-on component.
+
+Name | Default | Description
+--- | --- | ---
+Provider | [Empty] | The name of the provider used to configure Single sign-on. For now the only supported option is keycloak.
+
+### Single sign-on Example
+
+The following example uses keycloak as Single sign-on option for Argo CD.
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: status-badge-enabled
+spec:
+  sso:
+    provider: keycloak
 ```
 
 ## TLS Options
@@ -960,5 +1094,5 @@ metadata:
   labels:
     example: version
 spec:
-  version: v1.6.1
+  version: v1.7.7
 ```
