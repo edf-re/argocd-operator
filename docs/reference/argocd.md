@@ -301,6 +301,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to add to the Route.
 Enabled | `false` | Toggles the creation of a Route for the Grafana component.
+Labels | [Empty] | The map of labels to add to the Route.
 Path | `/` | The path for the Route.
 TLS | [Object] | The TLSConfig for the Route.
 WildcardPolicy| `None` | The wildcard policy for the Route. Can be one of `Subdomain` or `None`.
@@ -584,13 +585,43 @@ spec:
   kustomizeBuildOptions: --load_restrictor none
 ```
 
+## KustomizeVersions Options
+
+A list of configured Kustomize versions within your ArgoCD Repo Server Container Image. For each version, this generates the `kustomize.version.vX.Y.Z` field in the `argocd-cm` ConfigMap.
+
+The following properties are available for each item in the KustomizeVersions list.
+
+Name | Default | Description
+--- | --- | ---
+Version | "" | The Kustomize version in the format vX.Y.Z that is configured in your ArgoCD Repo Server container image.
+Path | "" | The path to the specified kustomize version on the file system within your ArgoCD Repo Server container image.
+
+## KustomizeVersions Example
+
+The following example configures additional Kustomize versions that are available within the ArgoCD Repo Server container image. These versions already need to be made available via a custom image. Only setting these properties in your ConfigMap does not automatically make them available if they are already not there.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ArgoCD
+metadata:
+  name: example-argocd
+  labels:
+    example: kustomize-versions
+spec:
+  kustomizeVersions:
+    - version: v4.1.0
+      path: /path/to/kustomize-4.1
+    - version: v3.5.4
+      path: /path/to/kustomize-3.5.4
+```
+
 ## OIDC Config
 
 OIDC configuration as an alternative to dex (optional). This property maps directly to the `oidc.config` field in the `argocd-cm` ConfigMap.
 
 ### OIDC Config Example
 
-The following example sets a value in the `argocd-cm` ConfigMap using the `KustomizeBuildOptions` property on the `ArgoCD` resource.
+The following example sets a value in the `argocd-cm` ConfigMap using the `oidcConfig` property on the `ArgoCD` resource.
 
 ``` yaml
 apiVersion: argoproj.io/v1alpha1
@@ -642,6 +673,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to add to the Route.
 Enabled | `false` | Toggles the creation of a Route for the Prometheus component.
+Labels | [Empty] | The map of labels to add to the Route.
 Path | `/` | The path for the Route.
 TLS | [Object] | The TLSConfig for the Route.
 WildcardPolicy| `None` | The wildcard policy for the Route. Can be one of `Subdomain` or `None`.
@@ -735,6 +767,8 @@ MountSAToken | false | Whether the ServiceAccount token should be mounted to the
 ServiceAccount | "" | The name of the ServiceAccount to use with the repo-server pod.
 VerifyTLS | false | Whether to enforce strict TLS checking on all components when communicating with repo server
 AutoTLS | "" | Provider to use for setting up TLS the repo-server's gRPC TLS certificate (one of: `openshift`). Currently only available for OpenShift.
+Image | `argoproj/argocd` | The container image for ArgoCD Repo Server. This overrides the `ARGOCD_REPOSERVER_IMAGE` environment variable.
+Version | v2.0.0 (SHA) | The tag to use with the ArgoCD Repo Server.
 
 ### Repo Example
 
@@ -938,6 +972,7 @@ Name | Default | Description
 --- | --- | ---
 Annotations | [Empty] | The map of annotations to add to the Route.
 Enabled | `false` | Toggles the creation of a Route for the Argo CD Server component.
+Labels | [Empty] | The map of labels to add to the Route.
 Path | `/` | The path for the Route.
 TLS | [Object] | The TLSConfig for the Route.
 WildcardPolicy| `None` | The wildcard policy for the Route. Can be one of `Subdomain` or `None`.
@@ -1010,7 +1045,11 @@ The following properties are available for configuring the Single sign-on compon
 
 Name | Default | Description
 --- | --- | ---
+Image | `registry.redhat.io/rh-sso-7/sso74-openshift-rhel8` | The container image for keycloak. This overrides the `ARGOCD_KEYCLOAK_IMAGE` environment variable.
 Provider | [Empty] | The name of the provider used to configure Single sign-on. For now the only supported option is keycloak.
+Resources | `Requests`: CPU=500m, Mem=512Mi, `Limits`: CPU=1000m, Mem=1024Mi | The container compute resources.
+VerifyTLS | true | Whether to enforce strict TLS checking when communicating with Keycloak service.
+Version | `sha256:39d752173fc97c29373cd44477b48bcb078531def0a897ee81a60e8d1d0212cc` | The tag to use with the keycloak container image.
 
 ### Single sign-on Example
 
@@ -1028,9 +1067,11 @@ spec:
     provider: keycloak
 ```
 
+Please refer to the keycloak user guide to learn more about configuring keycloak as a Single sign-on provider.
+
 ## TLS Options
 
-The following properties are available for configuring the Grafana component.
+The following properties are available for configuring the TLS settings.
 
 Name | Default | Description
 --- | --- | ---

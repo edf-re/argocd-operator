@@ -19,7 +19,11 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
+	"strings"
 	"time"
 
 	argoprojv1a1 "github.com/argoproj-labs/argocd-operator/pkg/apis/argoproj/v1alpha1"
@@ -27,9 +31,12 @@ import (
 	"github.com/argoproj-labs/argocd-operator/pkg/controller/argoutil"
 	argopass "github.com/argoproj/argo-cd/util/password"
 	tlsutil "github.com/operator-framework/operator-sdk/pkg/tls"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -275,6 +282,10 @@ func (r *ReconcileArgoCD) reconcileClusterSecrets(cr *argoprojv1a1.ArgoCD) error
 		return err
 	}
 
+	if err := r.reconcileClusterPermissionsSecret(cr); err != nil {
+		return err
+	}
+
 	if err := r.reconcileGrafanaSecret(cr); err != nil {
 		return err
 	}
@@ -371,6 +382,87 @@ func (r *ReconcileArgoCD) reconcileGrafanaSecret(cr *argoprojv1a1.ArgoCD) error 
 		common.ArgoCDKeyGrafanaAdminUsername: []byte(common.ArgoCDDefaultGrafanaAdminUsername),
 		common.ArgoCDKeyGrafanaAdminPassword: clusterSecret.Data[common.ArgoCDKeyAdminPassword],
 		common.ArgoCDKeyGrafanaSecretKey:     secretKey,
+	}
+
+	if err := controllerutil.SetControllerReference(cr, secret, r.scheme); err != nil {
+		return err
+	}
+	return r.client.Create(context.TODO(), secret)
+}
+
+// reconcileClusterPermissionsSecret ensures ArgoCD instance is namespace-scoped
+func (r *ReconcileArgoCD) reconcileClusterPermissionsSecret(cr *argoprojv1a1.ArgoCD) error {
+	var clusterConfigInstance bool
+	secret := argoutil.NewSecretWithSuffix(cr.ObjectMeta, "default-cluster-config")
+	secret.Labels[common.ArgoCDSecretTypeLabel] = "cluster"
+	dataBytes, _ := json.Marshal(map[string]interface{}{
+		"tlsClientConfig": map[string]interface{}{
+			"insecure": false,
+		},
+	})
+
+	namespaceList := corev1.NamespaceList{}
+	listOption := client.MatchingLabels{
+		common.ArgoCDManagedByLabel: cr.Namespace,
+	}
+	if err := r.client.List(context.TODO(), &namespaceList, listOption); err != nil {
+		return err
+	}
+
+	var namespaces []string
+	for _, namespace := range namespaceList.Items {
+		namespaces = append(namespaces, namespace.Name)
+	}
+
+	sort.Strings(namespaces)
+
+	secret.Data = map[string][]byte{
+		"config":     dataBytes,
+		"name":       []byte("in-cluster"),
+		"server":     []byte(common.ArgoCDDefaultServer),
+		"namespaces": []byte(strings.Join(namespaces, ",")),
+	}
+
+	if allowedNamespace(cr.Namespace, os.Getenv("ARGOCD_CLUSTER_CONFIG_NAMESPACES")) {
+		clusterConfigInstance = true
+	}
+
+	clusterSecrets := &corev1.SecretList{}
+	opts := &client.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{
+			common.ArgoCDSecretTypeLabel: "cluster",
+		}),
+		Namespace: cr.Namespace,
+	}
+
+	if err := r.client.List(context.TODO(), clusterSecrets, opts); err != nil {
+		return err
+	}
+	for _, s := range clusterSecrets.Items {
+		// check if cluster secret with default server address exists
+		// update the list of namespaces if value differs.
+		if string(s.Data["server"]) == common.ArgoCDDefaultServer {
+			if clusterConfigInstance {
+				if err := r.client.Delete(context.TODO(), &s); err != nil {
+					return err
+				}
+			} else {
+				ns := strings.Split(string(s.Data["namespaces"]), ",")
+				for _, n := range namespaces {
+					if !containsString(ns, strings.TrimSpace(n)) {
+						ns = append(ns, strings.TrimSpace(n))
+					}
+				}
+				sort.Strings(ns)
+				s.Data["namespaces"] = []byte(strings.Join(ns, ","))
+				return r.client.Update(context.TODO(), &s)
+			}
+		}
+	}
+
+	if clusterConfigInstance {
+		// do nothing
+		return nil
 	}
 
 	if err := controllerutil.SetControllerReference(cr, secret, r.scheme); err != nil {

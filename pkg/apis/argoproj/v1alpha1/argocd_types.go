@@ -270,12 +270,21 @@ type ArgoCDRepoSpec struct {
 	// The value specified here can currently be:
 	// - openshift - Use the OpenShift service CA to request TLS config
 	AutoTLS string `json:"autotls,omitempty"`
+
+	// Image is the ArgoCD Repo Server container image.
+	Image string `json:"image,omitempty"`
+
+	// Version is the ArgoCD Repo Server container image tag.
+	Version string `json:"version,omitempty"`
 }
 
 // ArgoCDRouteSpec defines the desired state for an OpenShift Route.
 type ArgoCDRouteSpec struct {
 	// Annotations is the map of annotations to use for the Route resource.
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Labels is the map of labels to use for the Route resource
+	Labels map[string]string `json:"labels,omitempty"`
 
 	// Enabled will toggle the creation of the OpenShift Route.
 	Enabled bool `json:"enabled"`
@@ -352,8 +361,24 @@ const (
 
 // ArgoCDSSOSpec defines SSO provider.
 type ArgoCDSSOSpec struct {
+	// Image is the SSO container image.
+	Image string `json:"image,omitempty"`
 	// Provider installs and configures the given SSO Provider with Argo CD.
 	Provider SSOProviderType `json:"provider,omitempty"`
+	// Resources defines the Compute Resources required by the container for SSO.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	// VerifyTLS set to false disables strict TLS validation.
+	VerifyTLS *bool `json:"verifyTLS,omitempty"`
+	// Version is the SSO container image tag.
+	Version string `json:"version,omitempty"`
+}
+
+// KustomizeVersionSpec is used to specify information about a kustomize version to be used within ArgoCD.
+type KustomizeVersionSpec struct {
+	// Version is a configured kustomize version in the format of vX.Y.Z
+	Version string `json:"version,omitempty"`
+	// Path is the path to a configured kustomize version on the filesystem of your repo server.
+	Path string `json:"path,omitempty"`
 }
 
 // ArgoCDSpec defines the desired state of ArgoCD
@@ -410,6 +435,9 @@ type ArgoCDSpec struct {
 
 	// KustomizeBuildOptions is used to specify build options/parameters to use with `kustomize build`.
 	KustomizeBuildOptions string `json:"kustomizeBuildOptions,omitempty"`
+
+	// KustomizeVersions is a listing of configured versions of Kustomize to be made available within ArgoCD.
+	KustomizeVersions []KustomizeVersionSpec `json:"kustomizeVersions,omitempty"`
 
 	// OIDCConfig is the OIDC configuration as an alternative to dex.
 	OIDCConfig string `json:"oidcConfig,omitempty"`

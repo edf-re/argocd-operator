@@ -324,6 +324,13 @@ func (r *ReconcileArgoCD) reconcileArgoConfigMap(cr *argoprojv1a1.ArgoCD) error 
 	cm.Data[common.ArgoCDKeyHelpChatURL] = getHelpChatURL(cr)
 	cm.Data[common.ArgoCDKeyHelpChatText] = getHelpChatText(cr)
 	cm.Data[common.ArgoCDKeyKustomizeBuildOptions] = getKustomizeBuildOptions(cr)
+
+	if len(cr.Spec.KustomizeVersions) > 0 {
+		for _, kv := range cr.Spec.KustomizeVersions {
+			cm.Data["kustomize.version."+kv.Version] = kv.Path
+		}
+	}
+
 	cm.Data[common.ArgoCDKeyOIDCConfig] = getOIDCConfig(cr)
 	if c := getResourceCustomizations(cr); c != "" {
 		cm.Data[common.ArgoCDKeyResourceCustomizations] = c
@@ -389,6 +396,10 @@ func (r *ReconcileArgoCD) reconcileDexConfiguration(cm *corev1.ConfigMap, cr *ar
 func (r *ReconcileArgoCD) reconcileExistingArgoConfigMap(cm *corev1.ConfigMap, cr *argoprojv1a1.ArgoCD) error {
 	changed := false
 
+	if cm.Data == nil {
+		cm.Data = make(map[string]string)
+	}
+
 	if cm.Data[common.ArgoCDKeyAdminEnabled] == fmt.Sprintf("%t", cr.Spec.DisableAdmin) {
 		cm.Data[common.ArgoCDKeyAdminEnabled] = fmt.Sprintf("%t", !cr.Spec.DisableAdmin)
 		changed = true
@@ -429,9 +440,20 @@ func (r *ReconcileArgoCD) reconcileExistingArgoConfigMap(cm *corev1.ConfigMap, c
 		changed = true
 	}
 
-	if cm.Data[common.ArgoCDKeyOIDCConfig] != cr.Spec.OIDCConfig {
-		cm.Data[common.ArgoCDKeyOIDCConfig] = cr.Spec.OIDCConfig
-		changed = true
+	if len(cr.Spec.KustomizeVersions) > 0 {
+		for _, kv := range cr.Spec.KustomizeVersions {
+			if cm.Data["kustomize.version"+kv.Version] != kv.Path {
+				cm.Data["kustomize.version."+kv.Version] = kv.Path
+				changed = true
+			}
+		}
+	}
+
+	if cr.Spec.SSO == nil {
+		if cm.Data[common.ArgoCDKeyOIDCConfig] != cr.Spec.OIDCConfig {
+			cm.Data[common.ArgoCDKeyOIDCConfig] = cr.Spec.OIDCConfig
+			changed = true
+		}
 	}
 
 	if cm.Data[common.ArgoCDKeyResourceCustomizations] != cr.Spec.ResourceCustomizations {

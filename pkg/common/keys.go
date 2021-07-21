@@ -131,6 +131,10 @@ const (
 	// ArgoCDKeyResourceInclusions is the configuration key for resource inclusions.
 	ArgoCDKeyResourceInclusions = "resource.inclusions"
 
+	// ArgoCDRepoImageEnvName is the environment variable used to get the image
+	// to used for the Dex container.
+	ArgoCDRepoImageEnvName = "ARGOCD_REPOSERVER_IMAGE"
+
 	// ArgoCDKeyRepositories is the configuration key for repositories.
 	ArgoCDKeyRepositories = "repositories"
 
@@ -176,6 +180,10 @@ const (
 	// to used for the argocd container.
 	ArgoCDImageEnvName = "ARGOCD_IMAGE"
 
+	// ArgoCDKeycloakImageEnvName is the environment variable used to get the image
+	// to used for the Keycloak container.
+	ArgoCDKeycloakImageEnvName = "ARGOCD_KEYCLOAK_IMAGE"
+
 	// ArgoCDRedisHAProxyImageEnvName is the environment variable used to get the image
 	// to used for the Redis HA Proxy container.
 	ArgoCDRedisHAProxyImageEnvName = "ARGOCD_REDIS_HA_PROXY_IMAGE"
@@ -194,4 +202,13 @@ const (
 
 	// ArgoCDDeletionFinalizer is a finalizer to implement pre-delete hooks
 	ArgoCDDeletionFinalizer = "argoproj.io/finalizer"
+
+	// ArgoCDDefaultServer is the default server address
+	ArgoCDDefaultServer = "https://kubernetes.default.svc"
+
+	// ArgoCDSecretTypeLabel is needed for cluster secrets
+	ArgoCDSecretTypeLabel = "argocd.argoproj.io/secret-type"
+
+	// ArgoCDManagedByLabel is needed to identify namespace managed by an instance on ArgoCD
+	ArgoCDManagedByLabel = "argocd.argoproj.io/managed-by"
 )

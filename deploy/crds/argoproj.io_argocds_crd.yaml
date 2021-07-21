@@ -288,6 +288,12 @@ spec:
                         description: Enabled will toggle the creation of the OpenShift
                           Route.
                         type: boolean
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels is the map of labels to use for the Route
+                          resource
+                        type: object
                       path:
                         description: Path the router watches for, to route traffic
                           for to the service.
@@ -441,6 +447,23 @@ spec:
                 description: KustomizeBuildOptions is used to specify build options/parameters
                   to use with `kustomize build`.
                 type: string
+              kustomizeVersions:
+                description: KustomizeVersions is a listing of configured versions
+                  of Kustomize to be made available within ArgoCD.
+                items:
+                  description: KustomizeVersionSpec is used to specify information
+                    about a kustomize version to be used within ArgoCD.
+                  properties:
+                    path:
+                      description: Path is the path to a configured kustomize version
+                        on the filesystem of your repo server.
+                      type: string
+                    version:
+                      description: Version is a configured kustomize version in the
+                        format of vX.Y.Z
+                      type: string
+                  type: object
+                type: array
               oidcConfig:
                 description: OIDCConfig is the OIDC configuration as an alternative
                   to dex.
@@ -520,6 +543,12 @@ spec:
                         description: Enabled will toggle the creation of the OpenShift
                           Route.
                         type: boolean
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels is the map of labels to use for the Route
+                          resource
+                        type: object
                       path:
                         description: Path the router watches for, to route traffic
                           for to the service.
@@ -647,6 +676,9 @@ spec:
                       can currently be: - openshift - Use the OpenShift service CA
                       to request TLS config'
                     type: string
+                  image:
+                    description: Image is the ArgoCD Repo Server container image.
+                    type: string
                   mountsatoken:
                     description: MountSAToken describes whether you would like to
                       have the Repo server mount the service account token
@@ -686,6 +718,10 @@ spec:
                     description: VerifyTLS defines whether repo server API should
                       be accessed using strict TLS validation
                     type: boolean
+                  version:
+                    description: Version is the ArgoCD Repo Server container image
+                      tag.
+                    type: string
                 type: object
               repositoryCredentials:
                 description: RepositoryCredentials are the Git pull credentials to
@@ -921,6 +957,12 @@ spec:
                         description: Enabled will toggle the creation of the OpenShift
                           Route.
                         type: boolean
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels is the map of labels to use for the Route
+                          resource
+                        type: object
                       path:
                         description: Path the router watches for, to route traffic
                           for to the service.
@@ -989,9 +1031,45 @@ spec:
                 description: SSO defines the Single Sign-on configuration for Argo
                   CD
                 properties:
+                  image:
+                    description: Image is the SSO container image.
+                    type: string
                   provider:
                     description: Provider installs and configures the given SSO Provider
                       with Argo CD.
+                    type: string
+                  resources:
+                    description: Resources defines the Compute Resources required
+                      by the container for SSO.
+                    properties:
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: 'Limits describes the maximum amount of compute
+                          resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/'
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: 'Requests describes the minimum amount of compute
+                          resources required. If Requests is omitted for a container,
+                          it defaults to Limits if that is explicitly specified, otherwise
+                          to an implementation-defined value. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/'
+                        type: object
+                    type: object
+                  verifyTLS:
+                    description: VerifyTLS set to false disables strict TLS validation.
+                    type: boolean
+                  version:
+                    description: Version is the SSO container image tag.
                     type: string
                 type: object
               statusBadgeEnabled:

@@ -161,10 +161,10 @@ const (
 	ArgoCDDefaultKustomizeBuildOptions = ""
 
 	// ArgoCDKeycloakImageName is the default Keycloak Image used when not specified.
-	ArgoCDKeycloakImageName = "sso74-openshift-rhel8"
+	ArgoCDKeycloakImageName = "registry.redhat.io/rh-sso-7/sso74-openshift-rhel8"
 
 	// ArgoCDKeycloakVersion is the default Keycloak version used when not specified.
-	ArgoCDKeycloakVersion = "7.4"
+	ArgoCDKeycloakVersion = "sha256:39d752173fc97c29373cd44477b48bcb078531def0a897ee81a60e8d1d0212cc"
 
 	// ArgoCDDefaultOIDCConfig is the default OIDC configuration.
 	ArgoCDDefaultOIDCConfig = ""
@@ -216,6 +216,12 @@ const (
 
 	// ArgoCDDefaultRepoServerPort is the default listen port for the Argo CD repo server.
 	ArgoCDDefaultRepoServerPort = 8081
+
+	// ArgoCDDefaultRepoImage is the ArgoCD Repo Server container image to use when not specified.
+	ArgoCDDefaultRepoImage = "argoproj/argocd"
+
+	// ArgoCDDefaultRepoVersion is the Argo CD Repo Server container image digest to use when version not specified.
+	ArgoCDDefaultRepoVersion = "sha256:8d1d58ef963f615da97e0b2c54dbe243801d5e7198b98393ab36b7a5768f72a4" // v2.0.0
 
 	// ArgoCDDefaultRepositories is the default repositories.
 	ArgoCDDefaultRepositories = ""

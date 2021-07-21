@@ -122,6 +122,33 @@ func TestReconcileArgoCD_reconcileArgoConfigMap(t *testing.T) {
 	}
 }
 
+func TestReconcileArgoCD_reconcileEmptyArgoConfigMap(t *testing.T) {
+	logf.SetLogger(logf.ZapLogger(true))
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t, a)
+
+	// An empty Argo CD Configmap
+	emptyArgoConfigmap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      common.ArgoCDConfigMapName,
+			Namespace: a.Namespace,
+		},
+	}
+
+	err := r.client.Create(context.TODO(), emptyArgoConfigmap)
+	assert.NilError(t, err)
+
+	err = r.reconcileArgoConfigMap(a)
+	assert.NilError(t, err)
+
+	cm := &corev1.ConfigMap{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+	assert.NilError(t, err)
+}
+
 func TestReconcileArgoCDCM_withRepoCredentials(t *testing.T) {
 	logf.SetLogger(logf.ZapLogger(true))
 	a := makeTestArgoCD()
@@ -245,6 +272,34 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withDexDisabled(t *testing.T) {
 
 	if c, ok := cm.Data["dex.config"]; ok {
 		t.Fatalf("reconcileArgoConfigMap failed, dex.config = %q", c)
+	}
+}
+
+func TestReconcileArgoCD_reconcileArgoConfigMap_withKustomizeVersions(t *testing.T) {
+	logf.SetLogger(logf.ZapLogger(true))
+	a := makeTestArgoCD(func(a *argoprojv1alpha1.ArgoCD) {
+		kv := argoprojv1alpha1.KustomizeVersionSpec{
+			Version: "v4.1.0",
+			Path:    "/path/to/kustomize-4.1",
+		}
+		var kvs []argoprojv1alpha1.KustomizeVersionSpec
+		kvs = append(kvs, kv)
+		a.Spec.KustomizeVersions = kvs
+	})
+	r := makeTestReconciler(t, a)
+
+	err := r.reconcileArgoConfigMap(a)
+	assert.NilError(t, err)
+
+	cm := &corev1.ConfigMap{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{
+		Name:      common.ArgoCDConfigMapName,
+		Namespace: testNamespace,
+	}, cm)
+	assert.NilError(t, err)
+
+	if diff := cmp.Diff(cm.Data["kustomize.version.v4.1.0"], "/path/to/kustomize-4.1"); diff != "" {
+		t.Fatalf("failed to reconcile configmap:\n%s", diff)
 	}
 }
 

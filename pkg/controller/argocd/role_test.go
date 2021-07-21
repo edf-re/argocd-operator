@@ -17,6 +17,8 @@ func TestReconcileArgoCD_reconcileRole(t *testing.T) {
 	logf.SetLogger(logf.ZapLogger(true))
 	a := makeTestArgoCD()
 	r := makeTestReconciler(t, a)
+	assert.NilError(t, createNamespace(r, a.Namespace, a.Namespace))
+	assert.NilError(t, createNamespace(r, "newNamespaceTest", a.Namespace))
 
 	workloadIdentifier := "x"
 	expectedRules := policyRuleForApplicationController()
@@ -26,6 +28,10 @@ func TestReconcileArgoCD_reconcileRole(t *testing.T) {
 	expectedName := fmt.Sprintf("%s-%s", a.Name, workloadIdentifier)
 	reconciledRole := &v1.Role{}
 	assert.NilError(t, r.client.Get(context.TODO(), types.NamespacedName{Name: expectedName, Namespace: a.Namespace}, reconciledRole))
+	assert.DeepEqual(t, expectedRules, reconciledRole.Rules)
+
+	// check if roles are created for the new namespace as well
+	assert.NilError(t, r.client.Get(context.TODO(), types.NamespacedName{Name: expectedName, Namespace: "newNamespaceTest"}, reconciledRole))
 	assert.DeepEqual(t, expectedRules, reconciledRole.Rules)
 
 	// update reconciledRole policy rules to RedisHa policy rules
@@ -43,6 +49,7 @@ func TestReconcileArgoCD_reconcileRole_dex_disabled(t *testing.T) {
 	logf.SetLogger(logf.ZapLogger(true))
 	a := makeTestArgoCD()
 	r := makeTestReconciler(t, a)
+	assert.NilError(t, createNamespace(r, a.Namespace, a.Namespace))
 
 	rules := policyRuleForDexServer()
 	role := newRole(dexServer, rules, a)
@@ -69,14 +76,14 @@ func TestReconcileArgoCD_reconcileClusterRole(t *testing.T) {
 
 	workloadIdentifier := common.ArgoCDApplicationControllerComponent
 	clusterRoleName := GenerateUniqueResourceName(workloadIdentifier, a)
-	expectedRules := []v1.PolicyRule{}
+	expectedRules := policyRuleForApplicationController()
 	_, err := r.reconcileClusterRole(workloadIdentifier, expectedRules, a)
 	assert.NilError(t, err)
 
 	// cluster role should not be created
 	assert.ErrorContains(t, r.client.Get(context.TODO(), types.NamespacedName{Name: clusterRoleName}, &v1.ClusterRole{}), "not found")
 
-	expectedRules = testClusterRoleRules()
+	os.Setenv("ARGOCD_CLUSTER_CONFIG_NAMESPACES", a.Namespace)
 	_, err = r.reconcileClusterRole(workloadIdentifier, expectedRules, a)
 	assert.NilError(t, err)
 
@@ -95,6 +102,25 @@ func TestReconcileArgoCD_reconcileClusterRole(t *testing.T) {
 	assert.DeepEqual(t, expectedRules, reconciledClusterRole.Rules)
 
 	// Check if the CLuster Role gets deleted
-	_, err = r.reconcileClusterRole(workloadIdentifier, []v1.PolicyRule{}, a)
+	os.Unsetenv("ARGOCD_CLUSTER_CONFIG_NAMESPACES")
+	_, err = r.reconcileClusterRole(workloadIdentifier, expectedRules, a)
 	assert.ErrorContains(t, r.client.Get(context.TODO(), types.NamespacedName{Name: clusterRoleName}, reconciledClusterRole), "not found")
+}
+
+func TestReconcileArgoCD_RoleHooks(t *testing.T) {
+	defer resetHooks()()
+	a := makeTestArgoCD()
+	r := makeTestReconciler(t)
+	assert.NilError(t, createNamespace(r, a.Namespace, a.Namespace))
+	Register(testRoleHook)
+
+	roles, err := r.reconcileRole(applicationController, []v1.PolicyRule{}, a)
+	role := roles[0]
+	assert.NilError(t, err)
+	assert.DeepEqual(t, role.Rules, testRules())
+
+	roles, err = r.reconcileRole("test", []v1.PolicyRule{}, a)
+	role = roles[0]
+	assert.NilError(t, err)
+	assert.DeepEqual(t, role.Rules, []v1.PolicyRule{})
 }
