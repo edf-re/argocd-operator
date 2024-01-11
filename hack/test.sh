@@ -16,15 +16,6 @@
 #
 # Script to run the operator tests.
 
-HACK_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-source ${HACK_DIR}/env.sh
+set -e 
 
-set -e
-
-kubectl create namespace argocd-e2e
-kubectl kuttl test
-kubectl delete namespace argocd-e2e
-
-kubectl create namespace argocd-e2e-cluster-config
-kubectl kuttl test --config kuttl-test-cluster-config.yaml
-kubectl delete namespace argocd-e2e-cluster-config
+kubectl kuttl test ./tests/k8s ./tests/ha --config ./tests/kuttl-tests.yaml 

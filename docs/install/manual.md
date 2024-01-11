@@ -1,4 +1,4 @@
-# Manual Installation
+# Manual Installation using kustomize
 
 The following steps can be used to manually install the operator on any Kubernetes environment with minimal overhead.
 
@@ -19,87 +19,113 @@ minikube start -p argocd --cpus=4 --disk-size=40gb --memory=8gb
 ## Manual Install
 
 The following section outlines the steps necessary to deploy the ArgoCD Operator manually using standard Kubernetes 
-manifests.
+manifests. Note that these steps generates the manifests using kustomize.
+
+!!! info
+    Make sure you download the source code from release section: https://github.com/argoproj-labs/argocd-operator/releases. Compiling from the source code cloned off main repo may not provide the most stable result.
 
 ### Namespace
 
-It is a good idea to create a new namespace for the operator.
+By default, the operator is installed into the `argocd-operator-system` namespace. To modify this, update the
+value of the `namespace` specified in the `config/default/kustomization.yaml` file. 
 
-```bash
-kubectl create namespace argocd
+### Conversion Webhook Support
+
+ArgoCD `v1alpha1` CRD has been **deprecated** starting from **argocd-operator v0.8.0**. To facilitate automatic migration of existing v1alpha1 ArgoCD CRs to v1beta1, conversion webhook support has been introduced.
+
+By default, the conversion webhook is disabled for the manual(non-OLM) installation of the operator. Users can modify the configurations to enable conversion webhook support using the instructions provided below.
+
+!!! warning
+    Enabling the webhook is optional. However, without conversion webhook support, users are responsible for migrating any existing ArgoCD v1alpha1 CRs to v1beta1.
+
+##### Enable Webhook Support
+
+To enable the operator to utilize the `cert-manager` for automated webhook certificate management, ensure that it is installed in the cluster. Use [this](https://cert-manager.io/docs/installation/) guide to install `cert-manager` if not present on the cluster.
+
+Add cert-manager annotation to CRD in `config/crd/patches/cainjection_in_argocds.yaml` file.
+```yaml
+metadata:
+  name: argocds.argoproj.io
+  annotations: 
+    cert-manager.io/inject-ca-from: $(CERTIFICATE_NAMESPACE)/$(CERTIFICATE_NAME)
 ```
 
-Once the namespace is created, set up the local context to use the new namespace.
-
-```bash
-kubectl config set-context argocd --cluster argocd --namespace argocd --user argocd
-kubectl config use-context argocd
+Enable `../certmanager` directory under the `resources` section in `config/default/kustomization.yaml` file.
+```yaml
+resources:
+.....
+- ../webhook
+# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
+- ../certmanager
 ```
 
-The remaining resources will now be created in the new namespace.
-
-### RBAC
-
-Set up RBAC for the ArgoCD operator and components.
-
-NOTE: The ClusterRoleBindings defined in `deploy/role_binding.yaml` use the `argocd` namespace. You will need to update these if using a different namespace.
- 
-
-```bash
-kubectl create -f deploy/service_account.yaml
-kubectl create -f deploy/role.yaml
-kubectl create -f deploy/role_binding.yaml
-kubectl create -f deploy/cluster_role.yaml
-kubectl create -f deploy/cluster_role_binding.yaml
+Enable all the `vars` under the `[CERTMANAGER]` section in `config/default/kustomization.yaml` file.
+```yaml
+vars:
+# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
+- name: CERTIFICATE_NAMESPACE # namespace of the certificate CR
+  objref:
+    kind: Certificate
+    group: cert-manager.io
+    version: v1
+    name: serving-cert # this name should match the one in certificate.yaml
+  fieldref:
+    fieldpath: metadata.namespace
+- name: CERTIFICATE_NAME
+  objref:
+    kind: Certificate
+    group: cert-manager.io
+    version: v1
+    name: serving-cert # this name should match the one in certificate.yaml
+- name: SERVICE_NAMESPACE # namespace of the service
+  objref:
+    kind: Service
+    version: v1
+    name: webhook-service
+  fieldref:
+    fieldpath: metadata.namespace
+- name: SERVICE_NAME
+  objref:
+    kind: Service
+    version: v1
+    name: webhook-service
 ```
 
-### CRDs
-
-Add the upstream Argo CD CRDs to the cluster.
-
-```bash
-kubectl create -f deploy/argo-cd
-```
-
-Add the ArgoCD Operator CRDs to the cluster.
-
-```bash
-kubectl create -f deploy/crds
-```
-
-There should be three CRDs present for ArgoCD on the cluster.
-
-```bash
-kubectl get crd
-```
-
-```bash
-NAME                       CREATED AT
-applications.argoproj.io   2019-11-09T02:35:47Z
-appprojects.argoproj.io    2019-11-09T02:35:47Z
-argocdexports.argoproj.io  2019-11-09T02:36:02Z
-argocds.argoproj.io        2019-11-09T02:36:02Z
+Additionally, set the `ENABLE_CONVERSION_WEBHOOK` environment variable in `config/default/manager_webhook_patch.yaml` file to enable the conversion webhook.
+```yaml
+      - name: manager
+        env:
+        - name: ENABLE_CONVERSION_WEBHOOK
+          value: "true"
 ```
 
 ### Deploy Operator
 
-Deploy the operator
+Deploy the operator. This will create all the necessary resources, including the namespace. For running the make command you need to install go-lang package on your system.
 
 ```bash
-kubectl create -f deploy/operator.yaml
+make deploy
+```
+
+If you want to use your own custom operator container image, you can specify the image name using the `IMG` variable.
+
+```bash
+make deploy IMG=quay.io/my-org/argocd-operator:latest
 ```
 
 The operator pod should start and enter a `Running` state after a few seconds.
 
 ```bash
-kubectl get pods
+kubectl get pods -n argocd-operator-system
 ```
 
 ```bash
-NAME                              READY   STATUS    RESTARTS   AGE
-argocd-operator-758dd86fb-sx8qj   1/1     Running   0          75s
+NAME                                                  READY   STATUS    RESTARTS   AGE
+argocd-operator-controller-manager-6c449c6998-ts95w   2/2     Running   0          33s
 ```
-
+!!! info
+    If you see `Error: container's runAsUser breaks non-root policy`, means container wants to have admin privilege. run `oc adm policy add-scc-to-user privileged -z default -n argocd-operator-system` to enable admin on the namespace and change the following line in deployment resource: `runAsNonRoot: false`. This is a quick fix to make it running, this is not a suggested approach for *production*.
+    
 ## Usage 
 
 Once the operator is installed and running, new ArgoCD resources can be created. See the [usage][docs_usage] 
@@ -107,6 +133,12 @@ documentation to learn how to create new `ArgoCD` resources.
 
 ## Cleanup 
 
-TODO
+To remove the operator from the cluster, run the following comand. This will remove all resources that were created,
+including the namespace.
+```bash
+make undeploy
+```
+
+
 
 [docs_usage]:../usage/basics.md

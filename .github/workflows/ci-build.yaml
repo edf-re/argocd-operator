@@ -3,25 +3,18 @@ on:
   push:
     branches:
       - 'master'
-      - 'v[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+-[0-9a-zA-Z]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-[0-9a-zA-Z]+'
+      - 'release-*'
+      - 'rhos-*'
   pull_request:
     branches:
       - 'master'
-      - 'v[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+-[0-9a-zA-Z]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-[0-9a-zA-Z]+'
+      - 'release-*'
+      - 'rhos-*'
 
 jobs:
 
   build-operator:
     runs-on: ubuntu-latest
-
-    env:
-      ARGOCD_OPERATOR_IMAGE_BUILDER: docker
 
     steps:
 
@@ -37,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.16
+          go-version: '1.20'
 
       - name: Restore go build cache
         uses: actions/cache@v1
@@ -45,28 +38,15 @@ jobs:
           path: ~/.cache/go-build
           key: ${{ runner.os }}-go-build-v1-${{ github.run_id }}
 
-      - name: Install operator-sdk
-        run: |
-          sudo apt-get install git -y
-          git clone https://github.com/operator-framework/operator-sdk ~/go/src/github.com/operator-framework/operator-sdk
-          cd ~/go/src/github.com/operator-framework/operator-sdk
-          git checkout v0.19.4
-          make tidy
-          make install
-
-      - name: Add ~/go/bin to PATH
-        run: |
-          echo ~/go/bin >> $GITHUB_PATH
-
-      - name: Build operator
-        run: bash hack/build.sh
+      - name: Build operator container image
+        run: make docker-build IMG=quay.io/argoprojlabs/argocd-operator:latest
 
   test-e2e:
     name: Run end-to-end tests
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        k3s-version: [ v1.20.2 ]
+        k3s-version: [ v1.27.1 ]
         # k3s-version: [v1.20.2, v1.19.2, v1.18.9, v1.17.11, v1.16.15]
     steps:
       - name: Download kuttl plugin
@@ -82,23 +62,20 @@ jobs:
           sudo mv ${KUTTL_PLUGIN_FILENAME} /usr/local/bin/kubectl-kuttl
           sudo chmod +x /usr/local/bin/kubectl-kuttl
           kubectl-kuttl version
-      - name: Install K3S
-        env:
-          INSTALL_K3S_VERSION: ${{ matrix.k3s-version }}+k3s1
+      - name: Install K3D
         run: |
           set -x
-          curl -sfL https://get.k3s.io | sh -
-          sudo chmod -R a+rw /etc/rancher/k3s
+          curl -s https://raw.githubusercontent.com/rancher/k3d/main/install.sh | bash
           sudo mkdir -p $HOME/.kube && sudo chown -R runner $HOME/.kube
-          sudo k3s kubectl config view --raw > $HOME/.kube/config
-          sudo chown runner $HOME/.kube/config
+          k3d cluster create --servers 3 --image rancher/k3s:${{ matrix.k3s-version }}-k3s1
           kubectl version
+          k3d version
       - name: Checkout code
         uses: actions/checkout@v2
       - name: Setup Golang
         uses: actions/setup-go@v1
         with:
-          go-version: 1.16
+          go-version: '1.20'
       - name: GH actions workaround - Kill XSP4 process
         run: |
           sudo pkill mono || true
@@ -107,17 +84,6 @@ jobs:
         with:
           path: ~/.cache/go-build
           key: ${{ runner.os }}-go-build-v1-${{ github.run_id }}
-      - name: Install operator-sdk
-        run: |
-          sudo apt-get install git -y
-          git clone https://github.com/operator-framework/operator-sdk ~/go/src/github.com/operator-framework/operator-sdk
-          cd ~/go/src/github.com/operator-framework/operator-sdk
-          git checkout v0.19.4
-          make tidy
-          make install
-      - name: Add ~/go/bin to PATH
-        run: |
-          echo "/home/runner/go/bin" >> $GITHUB_PATH
       - name: Add /usr/local/bin to PATH
         run: |
           echo "/usr/local/bin" >> $GITHUB_PATH
@@ -129,13 +95,13 @@ jobs:
           ARGOCD_CLUSTER_CONFIG_NAMESPACES: argocd-e2e-cluster-config
         run: |
           set -o pipefail
-          kubectl apply -f deploy/crds
-          kubectl apply -f deploy/argo-cd
+          make install generate fmt vet
           # Use tee to flush output to the log.  Other solutions like stdbuf don't work, not sure why.
-          operator-sdk run local --watch-namespace "" 2>&1 | tee /tmp/e2e-operator-run.log &
+          REDIS_CONFIG_PATH="build/redis" GRAFANA_CONFIG_PATH="grafana" go run ./main.go 2>&1 | tee /tmp/e2e-operator-run.log &
       - name: Run tests
         run: |
-          bash hack/test.sh 2>&1 > /tmp/e2e-test.log
+          set -o pipefail
+          bash hack/test.sh 2>&1 | tee /tmp/e2e-test.log
       - name: Upload operator logs
         uses: actions/upload-artifact@v2
         with:

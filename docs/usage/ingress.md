@@ -130,8 +130,13 @@ echo "`minikube ip -p argocd` example-argocd example-argocd-grpc example-argocd-
 The `argocd` client uses GRPC to communicate with the server. We can perform a login to verify access to the Argo CD 
 server.
 
-The default password for the admin user is the name for the server Pod (`example-argocd-server-d468768b-l5wnf` in this 
-example). The `--insecure` flag is required because we are using the default self-signed certificate.
+The default password for the admin user can be obtained using the below command.
+
+```bash
+kubectl get secret example-argocd-cluster -n argocd -ojsonpath='{.data.admin\.password}' | base64 -d ; echo
+```
+
+The `--insecure` flag is required because we are using the default self-signed certificate.
 
 ```bash
 argocd login example-argocd-grpc --insecure --username admin 
@@ -174,8 +179,11 @@ argocd app delete guestbook --insecure
 
 ### UI
 
-The server UI should be available at https://example-argocd/ and the admin password is the name for the server 
-Pod (`example-argocd-server-d468768b-l5wnf` in this example).
+The server UI should be available at https://example-argocd/ and the default password for the admin user can be obtained using the below command.
+
+```bash
+kubectl get secret example-argocd-cluster -n argocd -ojsonpath='{.data.admin\.password}' | base64 -d ; echo
+```
 
 ## Cleanup
 
@@ -185,3 +193,41 @@ kubectl delete -n argocd -f examples/argocd-ingress.yaml
 
 [install_olm]:../install/olm.md
 [docs_argo]:https://argoproj.github.io/argo-cd/getting_started/#creating-apps-via-cli
+
+### Host for Ingress in Argo CD Status
+
+When setting up access to Argo CD via an Ingress, one can easily retrieve hostnames used for accessing the Argo CD installation through the ArgoCD Operand's `status` field. To expose the `host` field, run `kubectl edit argocd argocd` and then edit the Argo CD instance server to have ingress enabled as `true`, like so: 
+
+```yaml
+server:
+    autoscale:
+      enabled: false
+    grpc:
+      ingress:
+        enabled: false
+    ingress:
+      enabled: true
+    route:
+      enabled: false
+    service:
+      type: ""
+  tls:
+    ca: {}
+```
+If an ingress is found, hostname(s) of the ingress can now be accessed by inspecting your Argo CD instance. This data could be the hostname and/or the IP address(es), depending on what data is available. It will look like the following: 
+
+```yaml
+status:
+  applicationController: Running
+  dex: Running
+  host: 172.24.0.7
+  phase: Available
+  redis: Running
+  repo: Running
+  server: Running
+  ssoConfig: Unknown
+```
+
+If both Route and Ingress are enabled in the Argo CD spec and a route is available, the status for the Route will be prioritized over the Ingress's. In that case, the `host` for the Ingress is not shown in the `status`. 
+
+Unlike with Routes, an Ingress does not go to pending status.  Hence, this will not affect the overall status of the Operand.
