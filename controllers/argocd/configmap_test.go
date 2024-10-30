@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -94,7 +95,7 @@ func TestReconcileArgoCD_reconcileTLSCerts_configMapUpdate(t *testing.T) {
 	}
 
 	// update a new cert in argocd-tls-certs-cm
-	testPEM := generateEncodedPEM(t, "example.com")
+	testPEM := generateEncodedPEM(t)
 
 	configMap.Data["example.com"] = string(testPEM)
 	assert.NoError(t, r.Client.Update(context.TODO(), configMap))
@@ -342,6 +343,26 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withDisableAdmin(t *testing.T) {
 func TestReconcileArgoCD_reconcileArgoConfigMap_withDexConnector(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 
+	getSampleDexConfig := func(t *testing.T) []byte {
+		t.Helper()
+
+		type expiry struct {
+			IdTokens    string `yaml:"idTokens"`
+			SigningKeys string `yaml:"signingKeys"`
+		}
+
+		dexCfg := map[string]interface{}{
+			"expiry": expiry{
+				IdTokens:    "1hr",
+				SigningKeys: "12hr",
+			},
+		}
+
+		dexCfgBytes, err := yaml.Marshal(dexCfg)
+		assert.NoError(t, err)
+		return dexCfgBytes
+	}
+
 	tests := []struct {
 		name             string
 		updateCrSpecFunc func(cr *argoproj.ArgoCD)
@@ -353,6 +374,18 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withDexConnector(t *testing.T) {
 					Provider: argoproj.SSOProviderTypeDex,
 					Dex: &argoproj.ArgoCDDexSpec{
 						OpenShiftOAuth: true,
+					},
+				}
+			},
+		},
+		{
+			name: "update .dex.config and verify that the dex connector is not overwritten",
+			updateCrSpecFunc: func(cr *argoproj.ArgoCD) {
+				cr.Spec.SSO = &argoproj.ArgoCDSSOSpec{
+					Provider: argoproj.SSOProviderTypeDex,
+					Dex: &argoproj.ArgoCDDexSpec{
+						OpenShiftOAuth: true,
+						Config:         string(getSampleDexConfig(t)),
 					},
 				}
 			},
@@ -416,6 +449,17 @@ func TestReconcileArgoCD_reconcileArgoConfigMap_withDexConnector(t *testing.T) {
 			dexConnector := connectors.([]interface{})[0].(map[interface{}]interface{})
 			config := dexConnector["config"]
 			assert.Equal(t, config.(map[interface{}]interface{})["clientID"], "system:serviceaccount:argocd:argocd-argocd-dex-server")
+
+			// verify that the dex config in the CR matches the config from the argocd-cm
+			if a.Spec.SSO.Dex.Config != "" {
+				expectedCfg := make(map[string]interface{})
+				expectedCfgStr, err := r.getOpenShiftDexConfig(a)
+				assert.NoError(t, err)
+
+				err = yaml.Unmarshal([]byte(expectedCfgStr), expectedCfg)
+				assert.NoError(t, err, fmt.Sprintf("failed to unmarshal %s", dex))
+				assert.Equal(t, expectedCfg, m)
+			}
 		})
 	}
 
@@ -996,4 +1040,70 @@ func Test_reconcileRBAC(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, cm.Data["policy.matchMode"], matcherMode)
+}
+
+func Test_validateOwnerReferences(t *testing.T) {
+	a := makeTestArgoCD()
+	uid := uuid.NewUUID()
+	a.UID = uid
+	resObjs := []client.Object{a}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+	cm := newConfigMapWithName(common.ArgoCDConfigMapName, a)
+
+	// verify when OwnerReferences is not set
+	_, err := validateOwnerReferences(a, cm, r.Scheme)
+	assert.NoError(t, err)
+
+	assert.Equal(t, cm.OwnerReferences[0].APIVersion, "argoproj.io/v1beta1")
+	assert.Equal(t, cm.OwnerReferences[0].Kind, "ArgoCD")
+	assert.Equal(t, cm.OwnerReferences[0].Name, "argocd")
+	assert.Equal(t, cm.OwnerReferences[0].UID, uid)
+
+	// verify when APIVersion is changed
+	cm.OwnerReferences[0].APIVersion = "test"
+
+	changed, err := validateOwnerReferences(a, cm, r.Scheme)
+	assert.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, cm.OwnerReferences[0].APIVersion, "argoproj.io/v1beta1")
+	assert.Equal(t, cm.OwnerReferences[0].Kind, "ArgoCD")
+	assert.Equal(t, cm.OwnerReferences[0].Name, "argocd")
+	assert.Equal(t, cm.OwnerReferences[0].UID, uid)
+
+	// verify when Kind is changed
+	cm.OwnerReferences[0].Kind = "test"
+
+	changed, err = validateOwnerReferences(a, cm, r.Scheme)
+	assert.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, cm.OwnerReferences[0].APIVersion, "argoproj.io/v1beta1")
+	assert.Equal(t, cm.OwnerReferences[0].Kind, "ArgoCD")
+	assert.Equal(t, cm.OwnerReferences[0].Name, "argocd")
+	assert.Equal(t, cm.OwnerReferences[0].UID, uid)
+
+	// verify when Kind is changed
+	cm.OwnerReferences[0].Name = "test"
+
+	changed, err = validateOwnerReferences(a, cm, r.Scheme)
+	assert.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, cm.OwnerReferences[0].APIVersion, "argoproj.io/v1beta1")
+	assert.Equal(t, cm.OwnerReferences[0].Kind, "ArgoCD")
+	assert.Equal(t, cm.OwnerReferences[0].Name, "argocd")
+	assert.Equal(t, cm.OwnerReferences[0].UID, uid)
+
+	// verify when UID is changed
+	cm.OwnerReferences[0].UID = "test"
+
+	changed, err = validateOwnerReferences(a, cm, r.Scheme)
+	assert.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, cm.OwnerReferences[0].APIVersion, "argoproj.io/v1beta1")
+	assert.Equal(t, cm.OwnerReferences[0].Kind, "ArgoCD")
+	assert.Equal(t, cm.OwnerReferences[0].Name, "argocd")
+	assert.Equal(t, cm.OwnerReferences[0].UID, uid)
 }

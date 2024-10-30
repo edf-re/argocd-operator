@@ -27,7 +27,7 @@ import (
 	"time"
 
 	argopass "github.com/argoproj/argo-cd/v2/util/password"
-	tlsutil "github.com/operator-framework/operator-sdk/pkg/tls"
+	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	"github.com/argoproj-labs/argocd-operator/common"
@@ -111,11 +111,12 @@ func newCertificateSecret(suffix string, caCert *x509.Certificate, caKey *rsa.Pr
 		return nil, err
 	}
 
-	cfg := &tlsutil.CertConfig{
-		CertName:     secret.Name,
-		CertType:     tlsutil.ClientAndServingCert,
-		CommonName:   secret.Name,
-		Organization: []string{cr.ObjectMeta.Namespace},
+	cfg := &certmanagerv1.CertificateSpec{
+		SecretName: secret.Name,
+		CommonName: secret.Name,
+		Subject: &certmanagerv1.X509Subject{
+			Organizations: []string{cr.ObjectMeta.Namespace},
+		},
 	}
 
 	dnsNames := []string{
@@ -124,8 +125,9 @@ func newCertificateSecret(suffix string, caCert *x509.Certificate, caKey *rsa.Pr
 		fmt.Sprintf("%s.%s.svc.cluster.local", cr.ObjectMeta.Name, cr.ObjectMeta.Namespace),
 	}
 
+	//nolint:staticcheck
 	if cr.Spec.Grafana.Enabled {
-		dnsNames = append(dnsNames, getGrafanaHost(cr))
+		log.Info(grafanaDeprecatedWarning)
 	}
 	if cr.Spec.Prometheus.Enabled {
 		dnsNames = append(dnsNames, getPrometheusHost(cr))
@@ -278,6 +280,10 @@ func (r *ReconcileArgoCD) reconcileClusterSecrets(cr *argoproj.ArgoCD) error {
 		return err
 	}
 
+	if err := r.reconcileRedisInitialPasswordSecret(cr); err != nil {
+		return err
+	}
+
 	if err := r.reconcileClusterCASecret(cr); err != nil {
 		return err
 	}
@@ -313,9 +319,10 @@ func (r *ReconcileArgoCD) reconcileExistingArgoSecret(cr *argoproj.ArgoCD, secre
 		secret.Data[common.ArgoCDKeyServerSecretKey] = sessionKey
 	}
 
+	// reset the value to default only when secret.data field is nil
 	if hasArgoAdminPasswordChanged(secret, clusterSecret) {
 		pwBytes, ok := clusterSecret.Data[common.ArgoCDKeyAdminPassword]
-		if ok {
+		if ok && secret.Data[common.ArgoCDKeyAdminPassword] == nil {
 			hashedPassword, err := argopass.HashPassword(strings.TrimRight(string(pwBytes), "\n"))
 			if err != nil {
 				return err
@@ -360,64 +367,14 @@ func (r *ReconcileArgoCD) reconcileExistingArgoSecret(cr *argoproj.ArgoCD, secre
 
 // reconcileGrafanaSecret will ensure that the Grafana Secret is present.
 func (r *ReconcileArgoCD) reconcileGrafanaSecret(cr *argoproj.ArgoCD) error {
+	//nolint:staticcheck
 	if !cr.Spec.Grafana.Enabled {
 		return nil // Grafana not enabled, do nothing.
 	}
 
-	clusterSecret := argoutil.NewSecretWithSuffix(cr, "cluster")
-	secret := argoutil.NewSecretWithSuffix(cr, "grafana")
+	log.Info(grafanaDeprecatedWarning)
 
-	if !argoutil.IsObjectFound(r.Client, cr.Namespace, clusterSecret.Name, clusterSecret) {
-		log.Info(fmt.Sprintf("cluster secret [%s] not found, waiting to reconcile grafana secret [%s]", clusterSecret.Name, secret.Name))
-		return nil
-	}
-
-	if argoutil.IsObjectFound(r.Client, cr.Namespace, secret.Name, secret) {
-		actual := string(secret.Data[common.ArgoCDKeyGrafanaAdminPassword])
-		expected := string(clusterSecret.Data[common.ArgoCDKeyAdminPassword])
-
-		if actual != expected {
-			log.Info("cluster secret changed, updating and reloading grafana")
-			secret.Data[common.ArgoCDKeyGrafanaAdminPassword] = clusterSecret.Data[common.ArgoCDKeyAdminPassword]
-			if err := r.Client.Update(context.TODO(), secret); err != nil {
-				return err
-			}
-
-			// Regenerate the Grafana configuration
-			cm := newConfigMapWithSuffix("grafana-config", cr)
-			if !argoutil.IsObjectFound(r.Client, cm.Namespace, cm.Name, cm) {
-				log.Info("unable to locate grafana-config")
-				return nil
-			}
-
-			if err := r.Client.Delete(context.TODO(), cm); err != nil {
-				return err
-			}
-
-			// Trigger rollout of Grafana Deployment
-			deploy := newDeploymentWithSuffix("grafana", "grafana", cr)
-			return r.triggerRollout(deploy, "admin.password.changed")
-		}
-		return nil // Nothing has changed, move along...
-	}
-
-	// Secret not found, create it...
-
-	secretKey, err := generateGrafanaSecretKey()
-	if err != nil {
-		return err
-	}
-
-	secret.Data = map[string][]byte{
-		common.ArgoCDKeyGrafanaAdminUsername: []byte(common.ArgoCDDefaultGrafanaAdminUsername),
-		common.ArgoCDKeyGrafanaAdminPassword: clusterSecret.Data[common.ArgoCDKeyAdminPassword],
-		common.ArgoCDKeyGrafanaSecretKey:     secretKey,
-	}
-
-	if err := controllerutil.SetControllerReference(cr, secret, r.Scheme); err != nil {
-		return err
-	}
-	return r.Client.Create(context.TODO(), secret)
+	return nil
 }
 
 // reconcileClusterPermissionsSecret ensures ArgoCD instance is namespace-scoped
@@ -696,4 +653,27 @@ func (r *ReconcileArgoCD) getClusterSecrets(cr *argoproj.ArgoCD) (*corev1.Secret
 	}
 
 	return clusterSecrets, nil
+}
+
+// reconcileRedisInitialPasswordSecret will ensure that the redis Secret is present for the cluster.
+func (r *ReconcileArgoCD) reconcileRedisInitialPasswordSecret(cr *argoproj.ArgoCD) error {
+	secret := argoutil.NewSecretWithSuffix(cr, "redis-initial-password")
+	if argoutil.IsObjectFound(r.Client, cr.Namespace, secret.Name, secret) {
+		return nil // Secret found, do nothing
+	}
+
+	redisInitialPassword, err := generateRedisAdminPassword()
+	if err != nil {
+		return err
+	}
+
+	secret.Data = map[string][]byte{
+		"immutable":                   []byte("true"),
+		common.ArgoCDKeyAdminPassword: redisInitialPassword,
+	}
+
+	if err := controllerutil.SetControllerReference(cr, secret, r.Scheme); err != nil {
+		return err
+	}
+	return r.Client.Create(context.TODO(), secret)
 }

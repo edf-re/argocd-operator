@@ -212,6 +212,7 @@ func getArgoRedisArgs(useTLS bool) []string {
 
 	args = append(args, "--save", "")
 	args = append(args, "--appendonly", "no")
+	args = append(args, "--requirepass $(REDIS_PASSWORD)")
 
 	if useTLS {
 		args = append(args, "--tls-port", "6379")
@@ -325,7 +326,7 @@ func getArgoServerCommand(cr *argoproj.ArgoCD, useTLSForRedis bool) []string {
 	if err != nil {
 		return cmd
 	}
-	if cr.Spec.SourceNamespaces != nil && len(cr.Spec.SourceNamespaces) > 0 {
+	if len(cr.Spec.SourceNamespaces) > 0 {
 		cmd = append(cmd, "--application-namespaces", fmt.Sprint(strings.Join(cr.Spec.SourceNamespaces, ",")))
 	}
 
@@ -356,7 +357,7 @@ func getDexServerAddress(cr *argoproj.ArgoCD) string {
 
 // getRepoServerAddress will return the Argo CD repo server address.
 func getRepoServerAddress(cr *argoproj.ArgoCD) string {
-	if cr.Spec.Repo.Remote != nil && *cr.Spec.Repo.Remote != "" {
+	if cr.Spec.Repo.IsRemote() {
 		return *cr.Spec.Repo.Remote
 	}
 	return fqdnServiceRef("repo-server", common.ArgoCDDefaultRepoServerPort, cr)
@@ -450,139 +451,29 @@ func (r *ReconcileArgoCD) reconcileDeployments(cr *argoproj.ArgoCD, useTLSForRed
 
 // reconcileGrafanaDeployment will ensure the Deployment resource is present for the ArgoCD Grafana component.
 func (r *ReconcileArgoCD) reconcileGrafanaDeployment(cr *argoproj.ArgoCD) error {
-	deploy := newDeploymentWithSuffix("grafana", "grafana", cr)
-	deploy.Spec.Replicas = getGrafanaReplicas(cr)
-	AddSeccompProfileForOpenShift(r.Client, &deploy.Spec.Template.Spec)
-	deploy.Spec.Template.Spec.Containers = []corev1.Container{{
-		Image:           getGrafanaContainerImage(cr),
-		ImagePullPolicy: corev1.PullAlways,
-		Name:            "grafana",
-		Ports: []corev1.ContainerPort{
-			{
-				ContainerPort: 3000,
-			},
-		},
-		Env:       proxyEnvVars(),
-		Resources: getGrafanaResources(cr),
-		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: boolPtr(false),
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{
-					"ALL",
-				},
-			},
-			RunAsNonRoot: boolPtr(true),
-			RunAsUser:    int64Ptr(472),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "grafana-config",
-				MountPath: "/etc/grafana",
-			}, {
-				Name:      "grafana-datasources-config",
-				MountPath: "/etc/grafana/provisioning/datasources",
-			}, {
-				Name:      "grafana-dashboards-config",
-				MountPath: "/etc/grafana/provisioning/dashboards",
-			}, {
-				Name:      "grafana-dashboard-templates",
-				MountPath: "/var/lib/grafana/dashboards",
-			},
-		},
-	}}
-
-	deploy.Spec.Template.Spec.ServiceAccountName = fmt.Sprintf("%s-%s", cr.Name, "argocd-grafana")
-	deploy.Spec.Template.Spec.Volumes = []corev1.Volume{
-		{
-			Name: "grafana-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: nameWithSuffix("grafana-config", cr),
-					},
-					Items: []corev1.KeyToPath{{
-						Key:  "grafana.ini",
-						Path: "grafana.ini",
-					}},
-				},
-			},
-		}, {
-			Name: "grafana-datasources-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: nameWithSuffix("grafana-config", cr),
-					},
-					Items: []corev1.KeyToPath{{
-						Key:  "datasource.yaml",
-						Path: "datasource.yaml",
-					}},
-				},
-			},
-		}, {
-			Name: "grafana-dashboards-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: nameWithSuffix("grafana-config", cr),
-					},
-					Items: []corev1.KeyToPath{{
-						Key:  "provider.yaml",
-						Path: "provider.yaml",
-					}},
-				},
-			},
-		}, {
-			Name: "grafana-dashboard-templates",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: nameWithSuffix("grafana-dashboards", cr),
-					},
-				},
-			},
-		},
-	}
-
-	existing := newDeploymentWithSuffix("grafana", "grafana", cr)
-	if argoutil.IsObjectFound(r.Client, cr.Namespace, existing.Name, existing) {
-		if !cr.Spec.Grafana.Enabled {
-			// Deployment exists but enabled flag has been set to false, delete the Deployment
-			return r.Client.Delete(context.TODO(), existing)
-		}
-		changed := false
-		if hasGrafanaSpecChanged(existing, cr) {
-			existing.Spec.Replicas = cr.Spec.Grafana.Size
-			changed = true
-		}
-		updateNodePlacement(existing, deploy, &changed)
-		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Env,
-			deploy.Spec.Template.Spec.Containers[0].Env) {
-			existing.Spec.Template.Spec.Containers[0].Env = deploy.Spec.Template.Spec.Containers[0].Env
-			changed = true
-		}
-		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].Resources, existing.Spec.Template.Spec.Containers[0].Resources) {
-			existing.Spec.Template.Spec.Containers[0].Resources = deploy.Spec.Template.Spec.Containers[0].Resources
-			changed = true
-		}
-		if changed {
-			return r.Client.Update(context.TODO(), existing)
-		}
-		return nil // Deployment found, do nothing
-	}
-
+	//nolint:staticcheck
 	if !cr.Spec.Grafana.Enabled {
 		return nil // Grafana not enabled, do nothing.
 	}
-	if err := controllerutil.SetControllerReference(cr, deploy, r.Scheme); err != nil {
-		return err
-	}
-	return r.Client.Create(context.TODO(), deploy)
+	log.Info(grafanaDeprecatedWarning)
+	return nil
 }
 
 // reconcileRedisDeployment will ensure the Deployment resource is present for the ArgoCD Redis component.
 func (r *ReconcileArgoCD) reconcileRedisDeployment(cr *argoproj.ArgoCD, useTLS bool) error {
 	deploy := newDeploymentWithSuffix("redis", "redis", cr)
+
+	env := append(proxyEnvVars(), corev1.EnvVar{
+		Name: "REDIS_PASSWORD",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+				},
+				Key: "admin.password",
+			},
+		},
+	})
 
 	AddSeccompProfileForOpenShift(r.Client, &deploy.Spec.Template.Spec)
 
@@ -597,7 +488,7 @@ func (r *ReconcileArgoCD) reconcileRedisDeployment(cr *argoproj.ArgoCD, useTLS b
 			},
 		},
 		Resources: getRedisResources(cr),
-		Env:       proxyEnvVars(),
+		Env:       env,
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: boolPtr(false),
 			Capabilities: &corev1.Capabilities{
@@ -607,6 +498,9 @@ func (r *ReconcileArgoCD) reconcileRedisDeployment(cr *argoproj.ArgoCD, useTLS b
 			},
 			RunAsNonRoot: boolPtr(true),
 			RunAsUser:    int64Ptr(999),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -639,6 +533,9 @@ func (r *ReconcileArgoCD) reconcileRedisDeployment(cr *argoproj.ArgoCD, useTLS b
 			// Deployment exists but component enabled flag has been set to false, delete the Deployment
 			log.Info("Redis exists but should be disabled. Deleting existing redis.")
 			return r.Client.Delete(context.TODO(), deploy)
+		} else if cr.Spec.Redis.IsRemote() {
+			log.Info("Redis remote exists but redis deployment should be disabled. Deleting existing redis.")
+			return r.Client.Delete(context.TODO(), deploy)
 		}
 		if cr.Spec.HA.Enabled {
 			// Deployment exists but HA enabled flag has been set to true, delete the Deployment
@@ -670,10 +567,20 @@ func (r *ReconcileArgoCD) reconcileRedisDeployment(cr *argoproj.ArgoCD, useTLS b
 			changed = true
 		}
 
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].SecurityContext, existing.Spec.Template.Spec.Containers[0].SecurityContext) {
+			existing.Spec.Template.Spec.Containers[0].SecurityContext = deploy.Spec.Template.Spec.Containers[0].SecurityContext
+			changed = true
+		}
+
 		if changed {
 			return r.Client.Update(context.TODO(), existing)
 		}
 		return nil // Deployment found with nothing to do, move along...
+	}
+
+	if cr.Spec.Redis.IsEnabled() && cr.Spec.Redis.IsRemote() {
+		log.Info("Custom Redis Endpoint. Skipping starting redis.")
+		return nil
 	}
 
 	if !cr.Spec.Redis.IsEnabled() {
@@ -693,6 +600,18 @@ func (r *ReconcileArgoCD) reconcileRedisDeployment(cr *argoproj.ArgoCD, useTLS b
 // reconcileRedisHAProxyDeployment will ensure the Deployment resource is present for the Redis HA Proxy component.
 func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) error {
 	deploy := newDeploymentWithSuffix("redis-ha-haproxy", "redis", cr)
+
+	var redisEnv = append(proxyEnvVars(), corev1.EnvVar{
+		Name: "AUTH",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+				},
+				Key: "admin.password",
+			},
+		},
+	})
 
 	deploy.Spec.Template.Spec.Affinity = &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
@@ -726,7 +645,7 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) e
 		Image:           getRedisHAProxyContainerImage(cr),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Name:            "haproxy",
-		Env:             proxyEnvVars(),
+		Env:             redisEnv,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
@@ -752,6 +671,9 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) e
 				},
 			},
 			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -788,6 +710,10 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) e
 					"ALL",
 				},
 			},
+			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -798,6 +724,10 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) e
 			{
 				Name:      "data",
 				MountPath: "/data",
+			},
+			{
+				Name:      "redis-initial-pass",
+				MountPath: "/redis-initial-pass",
 			},
 		},
 	}}
@@ -834,12 +764,24 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) e
 				},
 			},
 		},
+		{
+			Name: "redis-initial-pass",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+					Optional:   boolPtr(true),
+				},
+			},
+		},
 	}
 
 	deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
 		RunAsNonRoot: boolPtr(true),
 		RunAsUser:    int64Ptr(1000),
 		FSGroup:      int64Ptr(1000),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: "RuntimeDefault",
+		},
 	}
 	AddSeccompProfileForOpenShift(r.Client, &deploy.Spec.Template.Spec)
 
@@ -875,8 +817,18 @@ func (r *ReconcileArgoCD) reconcileRedisHAProxyDeployment(cr *argoproj.ArgoCD) e
 			changed = true
 		}
 
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].SecurityContext, existing.Spec.Template.Spec.Containers[0].SecurityContext) {
+			existing.Spec.Template.Spec.Containers[0].SecurityContext = deploy.Spec.Template.Spec.Containers[0].SecurityContext
+			changed = true
+		}
+
 		if !reflect.DeepEqual(deploy.Spec.Template.Spec.InitContainers[0].Resources, existing.Spec.Template.Spec.InitContainers[0].Resources) {
 			existing.Spec.Template.Spec.InitContainers[0].Resources = deploy.Spec.Template.Spec.InitContainers[0].Resources
+			changed = true
+		}
+
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.InitContainers[0].SecurityContext, existing.Spec.Template.Spec.InitContainers[0].SecurityContext) {
+			existing.Spec.Template.Spec.InitContainers[0].SecurityContext = deploy.Spec.Template.Spec.InitContainers[0].SecurityContext
 			changed = true
 		}
 
@@ -912,6 +864,17 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 
 	// Global proxy env vars go first
 	repoEnv := cr.Spec.Repo.Env
+	repoEnv = append(repoEnv, corev1.EnvVar{
+		Name: "REDIS_PASSWORD",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+				},
+				Key: "admin.password",
+			},
+		},
+	})
 	// Environment specified in the CR take precedence over everything else
 	repoEnv = argoutil.EnvMerge(repoEnv, proxyEnvVars(), false)
 	if cr.Spec.Repo.ExecTimeout != nil {
@@ -935,6 +898,9 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 				},
 			},
 			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -946,6 +912,15 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 
 	if cr.Spec.Repo.InitContainers != nil {
 		deploy.Spec.Template.Spec.InitContainers = append(deploy.Spec.Template.Spec.InitContainers, cr.Spec.Repo.InitContainers...)
+	}
+
+	// If the user has specified a custom volume mount that overrides the existing /tmp mount, then we should use the user's custom mount, rather than the default.
+	volumeMountOverridesTmpVolume := false
+	for _, volumeMount := range cr.Spec.Repo.VolumeMounts {
+		if volumeMount.MountPath == "/tmp" {
+			volumeMountOverridesTmpVolume = true
+			break
+		}
 	}
 
 	repoServerVolumeMounts := []corev1.VolumeMount{
@@ -966,10 +941,6 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			MountPath: "/app/config/gpg/keys",
 		},
 		{
-			Name:      "tmp",
-			MountPath: "/tmp",
-		},
-		{
 			Name:      "argocd-repo-server-tls",
 			MountPath: "/app/config/reposerver/tls",
 		},
@@ -981,6 +952,15 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			Name:      "plugins",
 			MountPath: "/home/argocd/cmp-server/plugins",
 		},
+	}
+
+	if !volumeMountOverridesTmpVolume {
+
+		repoServerVolumeMounts = append(repoServerVolumeMounts, corev1.VolumeMount{
+			Name:      "tmp",
+			MountPath: "/tmp",
+		})
+
 	}
 
 	if cr.Spec.Repo.VolumeMounts != nil {
@@ -1029,6 +1009,9 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 				},
 			},
 			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
+			},
 		},
 		VolumeMounts: repoServerVolumeMounts,
 	}}
@@ -1075,12 +1058,6 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			},
 		},
 		{
-			Name: "tmp",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		},
-		{
 			Name: "argocd-repo-server-tls",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
@@ -1112,6 +1089,16 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 		},
 	}
 
+	// If the user is not used a custom /tmp mount, then just use the default
+	if !volumeMountOverridesTmpVolume {
+		repoServerVolumes = append(repoServerVolumes, corev1.Volume{
+			Name: "tmp",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+
 	if cr.Spec.Repo.Volumes != nil {
 		repoServerVolumes = append(repoServerVolumes, cr.Spec.Repo.Volumes...)
 	}
@@ -1122,6 +1109,16 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 		deploy.Spec.Replicas = replicas
 	}
 
+	if cr.Spec.Repo.Annotations != nil {
+		deploy.Spec.Template.Annotations = cr.Spec.Repo.Annotations
+	}
+
+	if cr.Spec.Repo.Labels != nil {
+		for key, value := range cr.Spec.Repo.Labels {
+			deploy.Spec.Template.Labels[key] = value
+		}
+	}
+
 	existing := newDeploymentWithSuffix("repo-server", "repo-server", cr)
 	if argoutil.IsObjectFound(r.Client, cr.Namespace, existing.Name, existing) {
 
@@ -1129,6 +1126,9 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			log.Info("Existing ArgoCD Repo Server found but should be disabled. Deleting Repo Server")
 			// Delete existing deployment for ArgoCD Repo Server, if any ..
 			return r.Client.Delete(context.TODO(), existing)
+		} else if cr.Spec.Repo.IsRemote() {
+			log.Info("Repo Server remote field exists, Repo Server deployment should be disabled. Deleting Repo Server.")
+			return r.Client.Delete(context.TODO(), deploy)
 		}
 
 		changed := false
@@ -1167,6 +1167,10 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			existing.Spec.Template.Spec.Containers[0].Command = deploy.Spec.Template.Spec.Containers[0].Command
 			changed = true
 		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].SecurityContext, existing.Spec.Template.Spec.Containers[0].SecurityContext) {
+			existing.Spec.Template.Spec.Containers[0].SecurityContext = deploy.Spec.Template.Spec.Containers[0].SecurityContext
+			changed = true
+		}
 		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[1:],
 			existing.Spec.Template.Spec.Containers[1:]) {
 			existing.Spec.Template.Spec.Containers = append(existing.Spec.Template.Spec.Containers[0:1],
@@ -1177,7 +1181,6 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			existing.Spec.Template.Spec.InitContainers = deploy.Spec.Template.Spec.InitContainers
 			changed = true
 		}
-
 		if !reflect.DeepEqual(deploy.Spec.Replicas, existing.Spec.Replicas) {
 			existing.Spec.Replicas = deploy.Spec.Replicas
 			changed = true
@@ -1190,6 +1193,21 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 
 		if deploy.Spec.Template.Spec.ServiceAccountName != existing.Spec.Template.Spec.ServiceAccountName {
 			existing.Spec.Template.Spec.ServiceAccountName = deploy.Spec.Template.Spec.ServiceAccountName
+			existing.Spec.Template.Spec.DeprecatedServiceAccount = deploy.Spec.Template.Spec.ServiceAccountName
+			changed = true
+		}
+
+		deploy.Spec.Template.Annotations = cr.Spec.Repo.Annotations
+		if !reflect.DeepEqual(deploy.Spec.Template.Annotations, existing.Spec.Template.Annotations) {
+			existing.Spec.Template.Annotations = deploy.Spec.Template.Annotations
+			changed = true
+		}
+
+		for key, value := range cr.Spec.Repo.Labels {
+			deploy.Spec.Template.Labels[key] = value
+		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Labels, existing.Spec.Template.Labels) {
+			existing.Spec.Template.Labels = deploy.Spec.Template.Labels
 			changed = true
 		}
 
@@ -1197,6 +1215,11 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 			return r.Client.Update(context.TODO(), existing)
 		}
 		return nil // Deployment found with nothing to do, move along...
+	}
+
+	if cr.Spec.Redis.IsEnabled() && cr.Spec.Repo.IsRemote() {
+		log.Info("Custom Repo Endpoint. Skipping starting Repo Server.")
+		return nil
 	}
 
 	if !cr.Spec.Repo.IsEnabled() {
@@ -1214,8 +1237,46 @@ func (r *ReconcileArgoCD) reconcileRepoDeployment(cr *argoproj.ArgoCD, useTLSFor
 func (r *ReconcileArgoCD) reconcileServerDeployment(cr *argoproj.ArgoCD, useTLSForRedis bool) error {
 	deploy := newDeploymentWithSuffix("server", "server", cr)
 	serverEnv := cr.Spec.Server.Env
+	serverEnv = append(serverEnv, corev1.EnvVar{
+		Name: "REDIS_PASSWORD",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+				},
+				Key: "admin.password",
+			},
+		},
+	})
 	serverEnv = argoutil.EnvMerge(serverEnv, proxyEnvVars(), false)
 	AddSeccompProfileForOpenShift(r.Client, &deploy.Spec.Template.Spec)
+
+	if cr.Spec.Server.InitContainers != nil {
+		deploy.Spec.Template.Spec.InitContainers = append(deploy.Spec.Template.Spec.InitContainers, cr.Spec.Server.InitContainers...)
+	}
+
+	serverVolumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "ssh-known-hosts",
+			MountPath: "/app/config/ssh",
+		}, {
+			Name:      "tls-certs",
+			MountPath: "/app/config/tls",
+		},
+		{
+			Name:      "argocd-repo-server-tls",
+			MountPath: "/app/config/server/tls",
+		},
+		{
+			Name:      common.ArgoCDRedisServerTLSSecretName,
+			MountPath: "/app/config/server/tls/redis",
+		},
+	}
+
+	if cr.Spec.Server.VolumeMounts != nil {
+		serverVolumeMounts = append(serverVolumeMounts, cr.Spec.Server.VolumeMounts...)
+	}
+
 	deploy.Spec.Template.Spec.Containers = []corev1.Container{{
 		Command:         getArgoServerCommand(cr, useTLSForRedis),
 		Image:           getArgoContainerImage(cr),
@@ -1258,27 +1319,15 @@ func (r *ReconcileArgoCD) reconcileServerDeployment(cr *argoproj.ArgoCD, useTLSF
 				},
 			},
 			RunAsNonRoot: boolPtr(true),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "ssh-known-hosts",
-				MountPath: "/app/config/ssh",
-			}, {
-				Name:      "tls-certs",
-				MountPath: "/app/config/tls",
-			},
-			{
-				Name:      "argocd-repo-server-tls",
-				MountPath: "/app/config/server/tls",
-			},
-			{
-				Name:      common.ArgoCDRedisServerTLSSecretName,
-				MountPath: "/app/config/server/tls/redis",
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
 			},
 		},
+		VolumeMounts: serverVolumeMounts,
 	}}
 	deploy.Spec.Template.Spec.ServiceAccountName = fmt.Sprintf("%s-%s", cr.Name, "argocd-server")
-	deploy.Spec.Template.Spec.Volumes = []corev1.Volume{
+
+	serverVolumes := []corev1.Volume{
 		{
 			Name: "ssh-known-hosts",
 			VolumeSource: corev1.VolumeSource{
@@ -1319,8 +1368,53 @@ func (r *ReconcileArgoCD) reconcileServerDeployment(cr *argoproj.ArgoCD, useTLSF
 		},
 	}
 
+	if cr.Spec.Server.Volumes != nil {
+		serverVolumes = append(serverVolumes, cr.Spec.Server.Volumes...)
+	}
+
+	deploy.Spec.Template.Spec.Volumes = serverVolumes
+
+	if cr.Spec.Server.EnableRolloutsUI {
+
+		deploy.Spec.Template.Spec.InitContainers = append(deploy.Spec.Template.Spec.InitContainers, getRolloutInitContainer()...)
+
+		deploy.Spec.Template.Spec.Containers[0].VolumeMounts = append(deploy.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "extensions",
+			MountPath: "/tmp/extensions/",
+		})
+
+		deploy.Spec.Template.Spec.Volumes = append(deploy.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "extensions",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	} else if !cr.Spec.Server.EnableRolloutsUI {
+		deploy.Spec.Template.Spec.InitContainers = removeInitContainer(deploy.Spec.Template.Spec.InitContainers, "rollout-extension")
+		deploy.Spec.Template.Spec.Volumes = removeVolume(deploy.Spec.Template.Spec.Volumes, "extensions")
+		deploy.Spec.Template.Spec.Containers[0].VolumeMounts = removeVolumeMount(deploy.Spec.Template.Spec.Containers[0].VolumeMounts, "extensions")
+
+	}
+
 	if replicas := getArgoCDServerReplicas(cr); replicas != nil {
 		deploy.Spec.Replicas = replicas
+	}
+
+	if cr.Spec.Server.SidecarContainers != nil {
+		deploy.Spec.Template.Spec.Containers = append(deploy.Spec.Template.Spec.Containers, cr.Spec.Server.SidecarContainers...)
+	}
+
+	if cr.Spec.Server.Annotations != nil {
+		deploy.Spec.Template.Annotations = cr.Spec.Server.Annotations
+	}
+
+	if cr.Spec.Server.Labels != nil {
+		for key, value := range cr.Spec.Server.Labels {
+			deploy.Spec.Template.Labels[key] = value
+		}
+	}
+	if err := applyReconcilerHook(cr, deploy, ""); err != nil {
+		return err
 	}
 
 	existing := newDeploymentWithSuffix("server", "server", cr)
@@ -1344,6 +1438,10 @@ func (r *ReconcileArgoCD) reconcileServerDeployment(cr *argoproj.ArgoCD, useTLSF
 			existing.Spec.Template.Spec.Containers[0].Env = deploy.Spec.Template.Spec.Containers[0].Env
 			changed = true
 		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.InitContainers, existing.Spec.Template.Spec.InitContainers) {
+			existing.Spec.Template.Spec.InitContainers = deploy.Spec.Template.Spec.InitContainers
+			changed = true
+		}
 		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Command,
 			deploy.Spec.Template.Spec.Containers[0].Command) {
 			existing.Spec.Template.Spec.Containers[0].Command = deploy.Spec.Template.Spec.Containers[0].Command
@@ -1363,12 +1461,38 @@ func (r *ReconcileArgoCD) reconcileServerDeployment(cr *argoproj.ArgoCD, useTLSF
 			existing.Spec.Template.Spec.Containers[0].Resources = deploy.Spec.Template.Spec.Containers[0].Resources
 			changed = true
 		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[0].SecurityContext,
+			existing.Spec.Template.Spec.Containers[0].SecurityContext) {
+			existing.Spec.Template.Spec.Containers[0].SecurityContext = deploy.Spec.Template.Spec.Containers[0].SecurityContext
+			changed = true
+		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Spec.Containers[1:],
+			existing.Spec.Template.Spec.Containers[1:]) {
+			existing.Spec.Template.Spec.Containers = append(existing.Spec.Template.Spec.Containers[0:1],
+				deploy.Spec.Template.Spec.Containers[1:]...)
+			changed = true
+		}
 		if !reflect.DeepEqual(deploy.Spec.Replicas, existing.Spec.Replicas) {
 			if !cr.Spec.Server.Autoscale.Enabled {
 				existing.Spec.Replicas = deploy.Spec.Replicas
 				changed = true
 			}
 		}
+
+		deploy.Spec.Template.Annotations = cr.Spec.Server.Annotations
+
+		for key, value := range cr.Spec.Server.Labels {
+			deploy.Spec.Template.Labels[key] = value
+		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Annotations, existing.Spec.Template.Annotations) {
+			existing.Spec.Template.Annotations = deploy.Spec.Template.Annotations
+			changed = true
+		}
+		if !reflect.DeepEqual(deploy.Spec.Template.Labels, existing.Spec.Template.Labels) {
+			existing.Spec.Template.Labels = deploy.Spec.Template.Labels
+			changed = true
+		}
+
 		if changed {
 			return r.Client.Update(context.TODO(), existing)
 		}
@@ -1437,4 +1561,65 @@ func updateNodePlacement(existing *appsv1.Deployment, deploy *appsv1.Deployment,
 		existing.Spec.Template.Spec.Tolerations = deploy.Spec.Template.Spec.Tolerations
 		*changed = true
 	}
+}
+
+func getRolloutInitContainer() []corev1.Container {
+	return []corev1.Container{
+		{
+			Name:  "rollout-extension",
+			Image: common.ArgoCDExtensionInstallerImage,
+			Env: []corev1.EnvVar{
+				{
+					Name:  "EXTENSION_URL",
+					Value: common.ArgoRolloutsExtensionURL,
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "extensions",
+					MountPath: "/tmp/extensions/",
+				},
+			},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: boolPtr(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{
+						"ALL",
+					},
+				},
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: "RuntimeDefault",
+				},
+			},
+		},
+	}
+}
+
+func removeInitContainer(initContainers []corev1.Container, name string) []corev1.Container {
+	for i, container := range initContainers {
+		if container.Name == name {
+			// Remove the init container by slicing it out
+			return append(initContainers[:i], initContainers[i+1:]...)
+		}
+	}
+	// If the init container is not found, return the original list
+	return initContainers
+}
+
+func removeVolume(volumes []corev1.Volume, name string) []corev1.Volume {
+	for i, volume := range volumes {
+		if volume.Name == name {
+			return append(volumes[:i], volumes[i+1:]...)
+		}
+	}
+	return volumes
+}
+
+func removeVolumeMount(volumeMounts []corev1.VolumeMount, name string) []corev1.VolumeMount {
+	for i, volumeMount := range volumeMounts {
+		if volumeMount.Name == name {
+			return append(volumeMounts[:i], volumeMounts[i+1:]...)
+		}
+	}
+	return volumeMounts
 }

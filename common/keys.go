@@ -55,15 +55,6 @@ const (
 	// ArgoCDKeyGAAnonymizeUsers is the configuration key for the Google Analytics user anonymization.
 	ArgoCDKeyGAAnonymizeUsers = "ga.anonymizeusers"
 
-	// ArgoCDKeyGrafanaAdminUsername is the admin username key for labels.
-	ArgoCDKeyGrafanaAdminUsername = "admin.username"
-
-	// ArgoCDKeyGrafanaAdminPassword is the admin password key for labels.
-	ArgoCDKeyGrafanaAdminPassword = "admin.password"
-
-	// ArgoCDKeyGrafanaSecretKey is the "secret key" key for labels.
-	ArgoCDKeyGrafanaSecretKey = "secret.key"
-
 	// ArgoCDKeyHelpChatURL is the congifuration key for the help chat URL.
 	ArgoCDKeyHelpChatURL = "help.chatUrl"
 
@@ -129,10 +120,6 @@ const (
 
 	// ArgoCDKeyResourceTrackingMethod is the configuration key for resource tracking method
 	ArgoCDKeyResourceTrackingMethod = "application.resourceTrackingMethod"
-
-	// ArgoCDRepoImageEnvName is the environment variable used to get the image
-	// to used for the Dex container.
-	ArgoCDRepoImageEnvName = "ARGOCD_REPOSERVER_IMAGE"
 
 	// ArgoCDKeyRepositories is the configuration key for repositories.
 	ArgoCDKeyRepositories = "repositories"
@@ -201,10 +188,6 @@ const (
 	// to used for the Redis container.
 	ArgoCDRedisImageEnvName = "ARGOCD_REDIS_IMAGE"
 
-	// ArgoCDGrafanaImageEnvName is the environment variable used to get the image
-	// to used for the Grafana container.
-	ArgoCDGrafanaImageEnvName = "ARGOCD_GRAFANA_IMAGE"
-
 	// ArgoCDDeletionFinalizer is a finalizer to implement pre-delete hooks
 	ArgoCDDeletionFinalizer = "argoproj.io/finalizer"
 
@@ -219,6 +202,9 @@ const (
 
 	// ArgoCDManagedByClusterArgoCDLabel is needed to identify namespace mentioned as sourceNamespace on ArgoCD
 	ArgoCDManagedByClusterArgoCDLabel = "argocd.argoproj.io/managed-by-cluster-argocd"
+
+	// ArgoCDManagedByClusterArgoCDLabel is needed to identify namespace mentioned as sourceNamespace on ArgoCD
+	ArgoCDApplicationSetManagedByClusterArgoCDLabel = "argocd.argoproj.io/applicationset-managed-by-cluster-argocd"
 
 	// ArgoCDControllerClusterRoleEnvName is an environment variable to specify a custom cluster role for Argo CD application controller
 	ArgoCDControllerClusterRoleEnvName = "CONTROLLER_CLUSTER_ROLE"

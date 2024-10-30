@@ -33,7 +33,7 @@ import (
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
 )
 
-func getRedisHAReplicas(cr *argoproj.ArgoCD) *int32 {
+func getRedisHAReplicas() *int32 {
 	replicas := common.ArgoCDDefaultRedisHAReplicas
 	// TODO: Allow override of this value through CR?
 	return &replicas
@@ -94,8 +94,20 @@ func newStatefulSetWithSuffix(suffix string, component string, cr *argoproj.Argo
 func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 	ss := newStatefulSetWithSuffix("redis-ha-server", "redis", cr)
 
+	redisEnv := append(proxyEnvVars(), corev1.EnvVar{
+		Name: "AUTH",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+				},
+				Key: "admin.password",
+			},
+		},
+	})
+
 	ss.Spec.PodManagementPolicy = appsv1.OrderedReadyPodManagement
-	ss.Spec.Replicas = getRedisHAReplicas(cr)
+	ss.Spec.Replicas = getRedisHAReplicas()
 	ss.Spec.Selector = &metav1.LabelSelector{
 		MatchLabels: map[string]string{
 			common.ArgoCDKeyName: nameWithSuffix("redis-ha", cr),
@@ -137,6 +149,7 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 			Command: []string{
 				"redis-server",
 			},
+			Env:             redisEnv,
 			Image:           getRedisHAContainerImage(cr),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			LivenessProbe: &corev1.Probe{
@@ -185,6 +198,9 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 					},
 				},
 				RunAsNonRoot: boolPtr(true),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: "RuntimeDefault",
+				},
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -208,6 +224,7 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 			Command: []string{
 				"redis-sentinel",
 			},
+			Env:             redisEnv,
 			Image:           getRedisHAContainerImage(cr),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			LivenessProbe: &corev1.Probe{
@@ -256,6 +273,9 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 					},
 				},
 				RunAsNonRoot: boolPtr(true),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: "RuntimeDefault",
+				},
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -294,6 +314,17 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 				Name:  "SENTINEL_ID_2",
 				Value: "2bbec7894d954a8af3bb54d13eaec53cb024e2ca", // TODO: Should this be hard-coded?
 			},
+			{
+				Name: "AUTH",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+						},
+						Key: "admin.password",
+					},
+				},
+			},
 		},
 		Image:           getRedisHAContainerImage(cr),
 		ImagePullPolicy: corev1.PullIfNotPresent,
@@ -307,6 +338,9 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 				},
 			},
 			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -410,10 +444,20 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 				existing.Spec.Template.Spec.Containers[i].Resources = ss.Spec.Template.Spec.Containers[i].Resources
 				changed = true
 			}
+
+			if !reflect.DeepEqual(ss.Spec.Template.Spec.Containers[i].SecurityContext, existing.Spec.Template.Spec.Containers[i].SecurityContext) {
+				existing.Spec.Template.Spec.Containers[i].SecurityContext = ss.Spec.Template.Spec.Containers[i].SecurityContext
+				changed = true
+			}
 		}
 
 		if !reflect.DeepEqual(ss.Spec.Template.Spec.InitContainers[0].Resources, existing.Spec.Template.Spec.InitContainers[0].Resources) {
 			existing.Spec.Template.Spec.InitContainers[0].Resources = ss.Spec.Template.Spec.InitContainers[0].Resources
+			changed = true
+		}
+
+		if !reflect.DeepEqual(ss.Spec.Template.Spec.InitContainers[0].SecurityContext, existing.Spec.Template.Spec.InitContainers[0].SecurityContext) {
+			existing.Spec.Template.Spec.InitContainers[0].SecurityContext = ss.Spec.Template.Spec.InitContainers[0].SecurityContext
 			changed = true
 		}
 
@@ -422,6 +466,11 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 		}
 
 		return nil // StatefulSet found, do nothing
+	}
+
+	if cr.Spec.Redis.IsEnabled() && cr.Spec.Redis.Remote != nil && *cr.Spec.Redis.Remote != "" {
+		log.Info("Custom Redis Endpoint. Skipping starting redis.")
+		return nil
 	}
 
 	if !cr.Spec.Redis.IsEnabled() {
@@ -439,7 +488,7 @@ func (r *ReconcileArgoCD) reconcileRedisStatefulSet(cr *argoproj.ArgoCD) error {
 	return r.Client.Create(context.TODO(), ss)
 }
 
-func getArgoControllerContainerEnv(cr *argoproj.ArgoCD) []corev1.EnvVar {
+func getArgoControllerContainerEnv(cr *argoproj.ArgoCD, replicas int32) []corev1.EnvVar {
 	env := make([]corev1.EnvVar, 0)
 
 	env = append(env, corev1.EnvVar{
@@ -447,10 +496,22 @@ func getArgoControllerContainerEnv(cr *argoproj.ArgoCD) []corev1.EnvVar {
 		Value: "/home/argocd",
 	})
 
-	if cr.Spec.Controller.Sharding.Enabled {
+	env = append(env, corev1.EnvVar{
+		Name: "REDIS_PASSWORD",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: fmt.Sprintf("%s-%s", cr.Name, "redis-initial-password"),
+				},
+				Key: "admin.password",
+			},
+		},
+	})
+
+	if cr.Spec.Controller.Sharding.Enabled || (cr.Spec.Controller.Sharding.DynamicScalingEnabled != nil && *cr.Spec.Controller.Sharding.DynamicScalingEnabled) {
 		env = append(env, corev1.EnvVar{
 			Name:  "ARGOCD_CONTROLLER_REPLICAS",
-			Value: fmt.Sprint(cr.Spec.Controller.Sharding.Replicas),
+			Value: fmt.Sprint(replicas),
 		})
 	}
 
@@ -522,9 +583,29 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 	ss.Spec.Replicas = &replicas
 	controllerEnv := cr.Spec.Controller.Env
 	// Sharding setting explicitly overrides a value set in the env
-	controllerEnv = argoutil.EnvMerge(controllerEnv, getArgoControllerContainerEnv(cr), true)
+	controllerEnv = argoutil.EnvMerge(controllerEnv, getArgoControllerContainerEnv(cr, replicas), true)
 	// Let user specify their own environment first
 	controllerEnv = argoutil.EnvMerge(controllerEnv, proxyEnvVars(), false)
+
+	if cr.Spec.Controller.InitContainers != nil {
+		ss.Spec.Template.Spec.InitContainers = append(ss.Spec.Template.Spec.InitContainers, cr.Spec.Controller.InitContainers...)
+	}
+
+	controllerVolumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "argocd-repo-server-tls",
+			MountPath: "/app/config/controller/tls",
+		},
+		{
+			Name:      common.ArgoCDRedisServerTLSSecretName,
+			MountPath: "/app/config/controller/tls/redis",
+		},
+	}
+
+	if cr.Spec.Controller.VolumeMounts != nil {
+		controllerVolumeMounts = append(controllerVolumeMounts, cr.Spec.Controller.VolumeMounts...)
+	}
+
 	podSpec := &ss.Spec.Template.Spec
 	podSpec.Containers = []corev1.Container{{
 		Command:         getArgoApplicationControllerCommand(cr, useTLSForRedis),
@@ -556,21 +637,21 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 				},
 			},
 			RunAsNonRoot: boolPtr(true),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "argocd-repo-server-tls",
-				MountPath: "/app/config/controller/tls",
-			},
-			{
-				Name:      common.ArgoCDRedisServerTLSSecretName,
-				MountPath: "/app/config/controller/tls/redis",
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
 			},
 		},
+		VolumeMounts: controllerVolumeMounts,
 	}}
+
+	if cr.Spec.Controller.SidecarContainers != nil {
+		ss.Spec.Template.Spec.Containers = append(ss.Spec.Template.Spec.Containers, cr.Spec.Controller.SidecarContainers...)
+	}
+
 	AddSeccompProfileForOpenShift(r.Client, podSpec)
 	podSpec.ServiceAccountName = nameWithSuffix("argocd-application-controller", cr)
-	podSpec.Volumes = []corev1.Volume{
+
+	controllerVolumes := []corev1.Volume{
 		{
 			Name: "argocd-repo-server-tls",
 			VolumeSource: corev1.VolumeSource{
@@ -590,6 +671,12 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			},
 		},
 	}
+
+	if cr.Spec.Controller.Volumes != nil {
+		controllerVolumes = append(controllerVolumes, cr.Spec.Controller.Volumes...)
+	}
+
+	podSpec.Volumes = controllerVolumes
 
 	ss.Spec.Template.Spec.Affinity = &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
@@ -638,6 +725,9 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 					},
 				},
 				RunAsNonRoot: boolPtr(true),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: "RuntimeDefault",
+				},
 			},
 			VolumeMounts: getArgoImportVolumeMounts(),
 		}}
@@ -649,6 +739,16 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 	if invalidImagePod {
 		if err := r.Client.Delete(context.TODO(), ss); err != nil {
 			return err
+		}
+	}
+
+	if cr.Spec.Controller.Annotations != nil {
+		ss.Spec.Template.Annotations = cr.Spec.Controller.Annotations
+	}
+
+	if cr.Spec.Controller.Labels != nil {
+		for key, value := range cr.Spec.Controller.Labels {
+			ss.Spec.Template.Labels[key] = value
 		}
 	}
 
@@ -676,7 +776,10 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			existing.Spec.Template.Spec.Containers[0].Command = desiredCommand
 			changed = true
 		}
-
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.InitContainers, ss.Spec.Template.Spec.InitContainers) {
+			existing.Spec.Template.Spec.InitContainers = ss.Spec.Template.Spec.InitContainers
+			changed = true
+		}
 		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Env,
 			ss.Spec.Template.Spec.Containers[0].Env) {
 			existing.Spec.Template.Spec.Containers[0].Env = ss.Spec.Template.Spec.Containers[0].Env
@@ -695,14 +798,39 @@ func (r *ReconcileArgoCD) reconcileApplicationControllerStatefulSet(cr *argoproj
 			existing.Spec.Template.Spec.Containers[0].Resources = ss.Spec.Template.Spec.Containers[0].Resources
 			changed = true
 		}
+		if !reflect.DeepEqual(ss.Spec.Template.Spec.Containers[0].SecurityContext, existing.Spec.Template.Spec.Containers[0].SecurityContext) {
+			existing.Spec.Template.Spec.Containers[0].SecurityContext = ss.Spec.Template.Spec.Containers[0].SecurityContext
+			changed = true
+		}
 		if !reflect.DeepEqual(ss.Spec.Replicas, existing.Spec.Replicas) {
 			existing.Spec.Replicas = ss.Spec.Replicas
 			changed = true
 		}
 
+		if !reflect.DeepEqual(ss.Spec.Template.Spec.Containers[1:],
+			existing.Spec.Template.Spec.Containers[1:]) {
+			existing.Spec.Template.Spec.Containers = append(existing.Spec.Template.Spec.Containers[0:1],
+				ss.Spec.Template.Spec.Containers[1:]...)
+			changed = true
+		}
+
+		ss.Spec.Template.Annotations = cr.Spec.Controller.Annotations
+		if !reflect.DeepEqual(ss.Spec.Template.Annotations, existing.Spec.Template.Annotations) {
+			existing.Spec.Template.Annotations = ss.Spec.Template.Annotations
+			changed = true
+		}
+
+		for key, value := range cr.Spec.Controller.Labels {
+			ss.Spec.Template.Labels[key] = value
+		}
+		if !reflect.DeepEqual(ss.Spec.Template.Labels, existing.Spec.Template.Labels) {
+			existing.Spec.Template.Labels = ss.Spec.Template.Labels
+			changed = true
+		}
 		if changed {
 			return r.Client.Update(context.TODO(), existing)
 		}
+
 		return nil // StatefulSet found with nothing to do, move along...
 	}
 

@@ -47,12 +47,6 @@ const (
 	// ArgoCDExportStorageBackendLocal is the value for the local storage backend.
 	ArgoCDExportStorageBackendLocal = "local"
 
-	// ArgoCDGrafanaConfigMapSuffix is the default suffix for the Grafana configuration ConfigMap.
-	ArgoCDGrafanaConfigMapSuffix = "grafana-config"
-
-	// ArgoCDGrafanaDashboardConfigMapSuffix is the default suffix for the Grafana dashboards ConfigMap.
-	ArgoCDGrafanaDashboardConfigMapSuffix = "grafana-dashboards"
-
 	// ArgoCDKnownHostsConfigMapName is the upstream hard-coded SSH known hosts data ConfigMap name.
 	ArgoCDKnownHostsConfigMapName = "argocd-ssh-known-hosts-cm"
 
@@ -91,4 +85,13 @@ const (
 
 	//ApplicationSetServiceNameSuffix is the suffix for Apllication Set Controller Service
 	ApplicationSetServiceNameSuffix = "applicationset-controller"
+
+	// ArgoCDAggregateToControllerLabelKey is label to configure base aggregated ClusterRole for Argo CD Application Controller.
+	ArgoCDAggregateToControllerLabelKey = "argocd/aggregate-to-controller"
+
+	// ArgoCDAggregateToControllerLabelKey is label for aggregated ClusterRole to configure Admin permissions for Argo CD Application Controller.
+	ArgoCDAggregateToAdminLabelKey = "argocd/aggregate-to-admin"
+
+	// AutoUpdateAnnotationKey is the name of an annotation which prevents reconciliation if set to "false"
+	AutoUpdateAnnotationKey = "rbac.authorization.kubernetes.io/autoupdate"
 )

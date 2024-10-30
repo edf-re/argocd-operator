@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/argoproj/argo-cd/v2/util/glob"
+
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	"github.com/argoproj-labs/argocd-operator/common"
 
@@ -63,10 +65,48 @@ func isOwnerOfInterest(owner v1.OwnerReference) bool {
 	return false
 }
 
+// isUserManagedSecret checks if the given secret is referenced in the ArgoCD CR for configuring the Argo CD instance.
+// User-managed secrets are referenced by the ArgoCD CR but are not owned by Operator itself (i.e. managed by the user).
+// Returns the namespaced name of the ArgoCD instance if found and a boolean indicating whether the secret is user-managed.
+func (r *ReconcileArgoCD) isUserManagedSecret(ctx context.Context, o client.Object) (client.ObjectKey, bool) {
+	namespacedName := client.ObjectKey{}
+	var ok bool
+
+	// List ArgoCD instances in the same namespace as the secret.
+	argocds := &argoproj.ArgoCDList{}
+	err := r.Client.List(ctx, argocds, &client.ListOptions{Namespace: o.GetNamespace()})
+	if err != nil {
+		return namespacedName, false
+	}
+	// Return false if no ArgoCD instance or more than one is detected in the namespace.
+	if len(argocds.Items) != 1 {
+		return namespacedName, false
+	}
+	argocd := argocds.Items[0]
+	namespacedName.Name = argocd.Name
+	namespacedName.Namespace = argocd.Namespace
+
+	// Check if the secret is referenced in the ArgoCD CR.
+	if argocd.Spec.Server.Route.UseExternalCertificate() && argocd.Spec.Server.Route.TLS.ExternalCertificate.Name == o.GetName() {
+		ok = true
+	} else if argocd.Spec.Prometheus.Route.UseExternalCertificate() && argocd.Spec.Prometheus.Route.TLS.ExternalCertificate.Name == o.GetName() {
+		ok = true
+	} else if argocd.Spec.ApplicationSet != nil && argocd.Spec.ApplicationSet.WebhookServer.Route.UseExternalCertificate() && argocd.Spec.ApplicationSet.WebhookServer.Route.TLS.ExternalCertificate.Name == o.GetName() {
+		ok = true
+	}
+
+	return namespacedName, ok
+}
+
 // tlsSecretMapper maps a watch event on a secret of type TLS back to the
 // ArgoCD object that we want to reconcile.
 func (r *ReconcileArgoCD) tlsSecretMapper(ctx context.Context, o client.Object) []reconcile.Request {
 	var result = []reconcile.Request{}
+
+	// Check if secret is user-managed, meaning it is referenced in the ArgoCD CR for configuration.
+	if namespacedName, ok := r.isUserManagedSecret(ctx, o); ok {
+		return []reconcile.Request{{NamespacedName: namespacedName}}
+	}
 
 	if !isSecretOfInterest(o) {
 		return result
@@ -130,17 +170,16 @@ func (r *ReconcileArgoCD) tlsSecretMapper(ctx context.Context, o client.Object) 
 func (r *ReconcileArgoCD) namespaceResourceMapper(ctx context.Context, o client.Object) []reconcile.Request {
 	var result = []reconcile.Request{}
 
+	argocds := &argoproj.ArgoCDList{}
 	labels := o.GetLabels()
+	namespaceName := o.GetName()
 	if v, ok := labels[common.ArgoCDManagedByLabel]; ok {
-		argocds := &argoproj.ArgoCDList{}
 		if err := r.Client.List(context.TODO(), argocds, &client.ListOptions{Namespace: v}); err != nil {
 			return result
 		}
-
 		if len(argocds.Items) != 1 {
 			return result
 		}
-
 		argocd := argocds.Items[0]
 		namespacedName := client.ObjectKey{
 			Name:      argocd.Name,
@@ -148,6 +187,23 @@ func (r *ReconcileArgoCD) namespaceResourceMapper(ctx context.Context, o client.
 		}
 		result = []reconcile.Request{
 			{NamespacedName: namespacedName},
+		}
+	} else {
+		// If the namespace does not have the expected managed-by label,
+		// iterate through each ArgoCD instance to identify if the observed namespace
+		// matches any configured sourceNamespace pattern. If a match is found,
+		// generate a reconcile request for the instances.
+		if err := r.Client.List(ctx, argocds, &client.ListOptions{}); err != nil {
+			return result
+		}
+		for _, argocd := range argocds.Items {
+			if glob.MatchStringInList(argocd.Spec.SourceNamespaces, namespaceName, glob.GLOB) {
+				namespacedName := client.ObjectKey{
+					Name:      argocd.Name,
+					Namespace: argocd.Namespace,
+				}
+				result = append(result, reconcile.Request{NamespacedName: namespacedName})
+			}
 		}
 	}
 

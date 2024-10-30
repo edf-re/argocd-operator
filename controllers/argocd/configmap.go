@@ -17,14 +17,13 @@ package argocd
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
-	"strings"
 
 	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1beta1"
@@ -309,12 +308,6 @@ func newConfigMapWithName(name string, cr *argoproj.ArgoCD) *corev1.ConfigMap {
 	return cm
 }
 
-// newConfigMapWithName creates a new ConfigMap with the given suffix appended to the name.
-// The name for the CongifMap is based on the name of the given ArgCD.
-func newConfigMapWithSuffix(suffix string, cr *argoproj.ArgoCD) *corev1.ConfigMap {
-	return newConfigMapWithName(fmt.Sprintf("%s-%s", cr.ObjectMeta.Name, suffix), cr)
-}
-
 // reconcileConfigMaps will ensure that all ArgoCD ConfigMaps are present.
 func (r *ReconcileArgoCD) reconcileConfigMaps(cr *argoproj.ArgoCD, useTLSForRedis bool) error {
 	if err := r.reconcileArgoConfigMap(cr); err != nil {
@@ -428,9 +421,8 @@ func (r *ReconcileArgoCD) reconcileArgoConfigMap(cr *argoproj.ArgoCD) error {
 	if UseDex(cr) {
 		dexConfig := getDexConfig(cr)
 
-		// If no dexConfig expressed but openShiftOAuth is requested through `.spec.sso.dex`, use default
-		// openshift dex config
-		if dexConfig == "" && (cr.Spec.SSO != nil && cr.Spec.SSO.Dex != nil && cr.Spec.SSO.Dex.OpenShiftOAuth) {
+		// Append the default OpenShift dex config if the openShiftOAuth is requested through `.spec.sso.dex`.
+		if cr.Spec.SSO != nil && cr.Spec.SSO.Dex != nil && cr.Spec.SSO.Dex.OpenShiftOAuth {
 			cfg, err := r.getOpenShiftDexConfig(cr)
 			if err != nil {
 				return err
@@ -468,13 +460,30 @@ func (r *ReconcileArgoCD) reconcileArgoConfigMap(cr *argoproj.ArgoCD) error {
 			if err := r.reconcileDexConfiguration(existingCM, cr); err != nil {
 				return err
 			}
+			cm.Data[common.ArgoCDKeyDexConfig] = existingCM.Data[common.ArgoCDKeyDexConfig]
 		} else if cr.Spec.SSO != nil && cr.Spec.SSO.Provider.ToLower() == argoproj.SSOProviderTypeKeycloak {
 			// retain oidc.config during reconcilliation when keycloak is configured
 			cm.Data[common.ArgoCDKeyOIDCConfig] = existingCM.Data[common.ArgoCDKeyOIDCConfig]
 		}
 
+		changed := false
 		if !reflect.DeepEqual(cm.Data, existingCM.Data) {
 			existingCM.Data = cm.Data
+			changed = true
+		}
+
+		// Compare OwnerReferences
+		var refChanged bool
+		var err error
+		if refChanged, err = validateOwnerReferences(cr, existingCM, r.Scheme); err != nil {
+			return err
+		}
+
+		if refChanged {
+			changed = true
+		}
+
+		if changed {
 			return r.Client.Update(context.TODO(), existingCM)
 		}
 		return nil // Do nothing as there is no change in the configmap.
@@ -485,84 +494,26 @@ func (r *ReconcileArgoCD) reconcileArgoConfigMap(cr *argoproj.ArgoCD) error {
 
 // reconcileGrafanaConfiguration will ensure that the Grafana configuration ConfigMap is present.
 func (r *ReconcileArgoCD) reconcileGrafanaConfiguration(cr *argoproj.ArgoCD) error {
+	//nolint:staticcheck
 	if !cr.Spec.Grafana.Enabled {
 		return nil // Grafana not enabled, do nothing.
 	}
 
-	cm := newConfigMapWithSuffix(common.ArgoCDGrafanaConfigMapSuffix, cr)
-	if argoutil.IsObjectFound(r.Client, cr.Namespace, cm.Name, cm) {
-		return nil // ConfigMap found, do nothing
-	}
+	log.Info(grafanaDeprecatedWarning)
 
-	secret := argoutil.NewSecretWithSuffix(cr, "grafana")
-	secret, err := argoutil.FetchSecret(r.Client, cr.ObjectMeta, secret.Name)
-	if err != nil {
-		return err
-	}
-
-	grafanaConfig := GrafanaConfig{
-		Security: GrafanaSecurityConfig{
-			AdminUser:     string(secret.Data[common.ArgoCDKeyGrafanaAdminUsername]),
-			AdminPassword: string(secret.Data[common.ArgoCDKeyGrafanaAdminPassword]),
-			SecretKey:     string(secret.Data[common.ArgoCDKeyGrafanaSecretKey]),
-		},
-	}
-
-	data, err := loadGrafanaConfigs()
-	if err != nil {
-		return err
-	}
-
-	tmpls, err := loadGrafanaTemplates(&grafanaConfig)
-	if err != nil {
-		return err
-	}
-
-	for key, val := range tmpls {
-		data[key] = val
-	}
-	cm.Data = data
-
-	if err := controllerutil.SetControllerReference(cr, cm, r.Scheme); err != nil {
-		return err
-	}
-	return r.Client.Create(context.TODO(), cm)
+	return nil
 }
 
 // reconcileGrafanaDashboards will ensure that the Grafana dashboards ConfigMap is present.
 func (r *ReconcileArgoCD) reconcileGrafanaDashboards(cr *argoproj.ArgoCD) error {
+	//nolint:staticcheck
 	if !cr.Spec.Grafana.Enabled {
 		return nil // Grafana not enabled, do nothing.
 	}
 
-	cm := newConfigMapWithSuffix(common.ArgoCDGrafanaDashboardConfigMapSuffix, cr)
-	if argoutil.IsObjectFound(r.Client, cr.Namespace, cm.Name, cm) {
-		return nil // ConfigMap found, do nothing
-	}
+	log.Info(grafanaDeprecatedWarning)
 
-	pattern := filepath.Join(getGrafanaConfigPath(), "dashboards/*.json")
-	dashboards, err := filepath.Glob(pattern)
-	if err != nil {
-		return err
-	}
-
-	data := make(map[string]string)
-	for _, f := range dashboards {
-		dashboard, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
-
-		parts := strings.Split(f, "/")
-		filename := parts[len(parts)-1]
-		data[filename] = string(dashboard)
-	}
-	cm.Data = data
-
-	if err := controllerutil.SetControllerReference(cr, cm, r.Scheme); err != nil {
-		return err
-	}
-	return r.Client.Create(context.TODO(), cm)
+	return nil
 }
 
 // reconcileRBAC will ensure that the ArgoCD RBAC ConfigMap is present.
@@ -606,6 +557,50 @@ func (r *ReconcileArgoCD) reconcileRBACConfigMap(cm *corev1.ConfigMap, cr *argop
 		return r.Client.Update(context.TODO(), cm)
 	}
 	return nil // ConfigMap exists and nothing to do, move along...
+}
+
+// validateOwnerReferences checks if OwnerReferences is changed
+func validateOwnerReferences(cr *argoproj.ArgoCD, cm *corev1.ConfigMap, scheme *runtime.Scheme) (bool, error) {
+	changed := false
+
+	if cm.OwnerReferences != nil {
+		ref := cm.OwnerReferences[0]
+
+		gvk, err := apiutil.GVKForObject(cr, scheme)
+		if err != nil {
+			return false, err
+		}
+
+		if ref.APIVersion != gvk.GroupVersion().String() {
+			cm.OwnerReferences[0].APIVersion = gvk.GroupVersion().String()
+			changed = true
+		}
+
+		if ref.Kind != gvk.Kind {
+			cm.OwnerReferences[0].Kind = gvk.Kind
+			changed = true
+		}
+
+		if ref.UID != cr.GetUID() {
+			cm.OwnerReferences[0].UID = cr.GetUID()
+			changed = true
+		}
+
+		if ref.Name != cr.GetName() {
+			cm.OwnerReferences[0].Name = cr.GetName()
+			changed = true
+		}
+		return changed, nil
+
+	}
+
+	if cm.OwnerReferences == nil {
+		if err := controllerutil.SetControllerReference(cr, cm, scheme); err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
 }
 
 // reconcileRedisConfiguration will ensure that all of the Redis ConfigMaps are present for the given ArgoCD.

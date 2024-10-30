@@ -2,12 +2,15 @@ package argocd
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	monitoringv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	"github.com/argoproj-labs/argocd-operator/common"
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
@@ -166,7 +170,7 @@ func TestReconcileNotifications_CreateDeployments(t *testing.T) {
 	assert.Equal(t, deployment.Spec.Template.Spec.ServiceAccountName, sa.ObjectMeta.Name)
 
 	want := []corev1.Container{{
-		Command:         []string{"argocd-notifications", "--loglevel", "info"},
+		Command:         []string{"argocd-notifications", "--loglevel", "info", "--argocd-repo-server", "argocd-repo-server.argocd.svc.cluster.local:8081"},
 		Image:           argoutil.CombineImageTag(common.ArgoCDDefaultArgoImage, common.ArgoCDDefaultArgoVersion),
 		ImagePullPolicy: corev1.PullAlways,
 		Name:            "argocd-notifications-controller",
@@ -176,6 +180,9 @@ func TestReconcileNotifications_CreateDeployments(t *testing.T) {
 				Drop: []corev1.Capability{
 					"ALL",
 				},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: "RuntimeDefault",
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
@@ -252,6 +259,91 @@ func TestReconcileNotifications_CreateDeployments(t *testing.T) {
 	assert.True(t, errors.IsNotFound(err))
 }
 
+func TestReconcileNotifications_CreateMetricsService(t *testing.T) {
+	a := makeTestArgoCD(func(a *argoproj.ArgoCD) {
+		a.Spec.Notifications.Enabled = true
+	})
+
+	resObjs := []client.Object{a}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	err := monitoringv1.AddToScheme(r.Scheme)
+	assert.NoError(t, err)
+
+	err = r.reconcileNotificationsMetricsService(a)
+	assert.NoError(t, err)
+
+	testService := &corev1.Service{}
+	assert.NoError(t, r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      fmt.Sprintf("%s-%s", a.Name, "notifications-controller-metrics"),
+		Namespace: a.Namespace,
+	}, testService))
+
+	assert.Equal(t, testService.ObjectMeta.Labels["app.kubernetes.io/name"],
+		fmt.Sprintf("%s-%s", a.Name, "notifications-controller-metrics"))
+
+	assert.Equal(t, testService.Spec.Selector["app.kubernetes.io/name"],
+		fmt.Sprintf("%s-%s", a.Name, "notifications-controller"))
+
+	assert.Equal(t, testService.Spec.Ports[0].Port, int32(9001))
+	assert.Equal(t, testService.Spec.Ports[0].TargetPort, intstr.IntOrString{
+		IntVal: int32(9001),
+	})
+	assert.Equal(t, testService.Spec.Ports[0].Protocol, v1.Protocol("TCP"))
+	assert.Equal(t, testService.Spec.Ports[0].Name, "metrics")
+}
+
+func TestReconcileNotifications_CreateServiceMonitor(t *testing.T) {
+
+	a := makeTestArgoCD(func(a *argoproj.ArgoCD) {
+		a.Spec.Notifications.Enabled = true
+	})
+
+	resObjs := []client.Object{a}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	monitoringv1.AddToScheme(sch)
+	v1alpha1.AddToScheme(sch)
+
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	// Notifications controller service monitor should not be created when Prometheus API is not found.
+	prometheusAPIFound = false
+	err := r.reconcileNotificationsController(a)
+	assert.NoError(t, err)
+
+	testServiceMonitor := &monitoringv1.ServiceMonitor{}
+	assert.Error(t, r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      fmt.Sprintf("%s-%s", a.Name, "notifications-controller-metrics"),
+		Namespace: a.Namespace,
+	}, testServiceMonitor))
+
+	// Prometheus API found, Verify notification controller service monitor exists.
+	prometheusAPIFound = true
+	err = r.reconcileNotificationsController(a)
+	assert.NoError(t, err)
+
+	testServiceMonitor = &monitoringv1.ServiceMonitor{}
+	assert.NoError(t, r.Client.Get(context.TODO(), types.NamespacedName{
+		Name:      fmt.Sprintf("%s-%s", a.Name, "notifications-controller-metrics"),
+		Namespace: a.Namespace,
+	}, testServiceMonitor))
+
+	assert.Equal(t, testServiceMonitor.ObjectMeta.Labels["release"], "prometheus-operator")
+
+	assert.Equal(t, testServiceMonitor.Spec.Endpoints[0].Port, "metrics")
+	assert.Equal(t, testServiceMonitor.Spec.Endpoints[0].Scheme, "http")
+	assert.Equal(t, testServiceMonitor.Spec.Endpoints[0].Interval, "30s")
+	assert.Equal(t, testServiceMonitor.Spec.Selector.MatchLabels["app.kubernetes.io/name"],
+		fmt.Sprintf("%s-%s", a.Name, "notifications-controller-metrics"))
+}
+
 func TestReconcileNotifications_CreateSecret(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 	a := makeTestArgoCD(func(a *argoproj.ArgoCD) {
@@ -279,38 +371,6 @@ func TestReconcileNotifications_CreateSecret(t *testing.T) {
 	assert.NoError(t, err)
 	secret := &corev1.Secret{}
 	err = r.Client.Get(context.TODO(), types.NamespacedName{Name: "argocd-notifications-secret", Namespace: a.Namespace}, secret)
-	assertNotFound(t, err)
-}
-
-func TestReconcileNotifications_CreateConfigMap(t *testing.T) {
-	logf.SetLogger(ZapLogger(true))
-	a := makeTestArgoCD(func(a *argoproj.ArgoCD) {
-		a.Spec.Notifications.Enabled = true
-	})
-
-	resObjs := []client.Object{a}
-	subresObjs := []client.Object{a}
-	runtimeObjs := []runtime.Object{}
-	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
-	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
-	r := makeTestReconciler(cl, sch)
-
-	err := r.reconcileNotificationsConfigMap(a)
-	assert.NoError(t, err)
-
-	testCm := &corev1.ConfigMap{}
-	assert.NoError(t, r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      "argocd-notifications-cm",
-		Namespace: a.Namespace,
-	}, testCm))
-
-	assert.True(t, len(testCm.Data) > 0)
-
-	a.Spec.Notifications.Enabled = false
-	err = r.reconcileNotificationsConfigMap(a)
-	assert.NoError(t, err)
-	testCm = &corev1.ConfigMap{}
-	err = r.Client.Get(context.TODO(), types.NamespacedName{Name: "argocd-notifications-cm", Namespace: a.Namespace}, testCm)
 	assertNotFound(t, err)
 }
 
@@ -413,6 +473,8 @@ func TestReconcileNotifications_testLogLevel(t *testing.T) {
 		"argocd-notifications",
 		"--loglevel",
 		"debug",
+		"--argocd-repo-server",
+		"argocd-repo-server.argocd.svc.cluster.local:8081",
 	}
 
 	if diff := cmp.Diff(expectedCMD, deployment.Spec.Template.Spec.Containers[0].Command); diff != "" {

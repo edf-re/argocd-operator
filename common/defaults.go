@@ -18,6 +18,12 @@ const (
 	// ArgoCDApplicationControllerComponent is the name of the application controller control plane component
 	ArgoCDApplicationControllerComponent = "argocd-application-controller"
 
+	// ArgoCDApplicationControllerComponentView is the name of aggregated ClusterRole to configure view permissions for the application controller control plane component
+	ArgoCDApplicationControllerComponentView = "argocd-application-controller-view"
+
+	// ArgoCDApplicationControllerComponentAdmin is the name of aggregated ClusterRole to configure admin permissions for the application controller control plane component
+	ArgoCDApplicationControllerComponentAdmin = "argocd-application-controller-admin"
+
 	// ArgoCDApplicationControllerDefaultShardReplicas is the default number of replicas that the ArgoCD Application Controller Should Use
 	ArgocdApplicationControllerDefaultReplicas = 1
 
@@ -42,6 +48,9 @@ const (
 	// ArgoCDNotificationsControllerComponent is the name of the Notifications controller control plane component
 	ArgoCDNotificationsControllerComponent = "argocd-notifications-controller"
 
+	// ArgoCDApplicationSetControllerComponent is the name of the ApplictionSet controller control plane component
+	ArgoCDApplicationSetControllerComponent = "argocd-applicationset-controller"
+
 	// ArgoCDOperatorGrafanaComponent is the name of the Grafana control plane component
 	ArgoCDOperatorGrafanaComponent = "argocd-grafana"
 
@@ -61,7 +70,7 @@ const (
 	ArgoCDDefaultArgoImage = "quay.io/argoproj/argocd"
 
 	// ArgoCDDefaultArgoVersion is the Argo CD container image digest to use when version not specified.
-	ArgoCDDefaultArgoVersion = "sha256:8576d347f30fa4c56a0129d1c0a0f5ed1e75662f0499f1ed7e917c405fd909dc" // v2.9.2
+	ArgoCDDefaultArgoVersion = "sha256:68894064bc381c19ea951029510aa614bd26bf46c2ec65ea445c7d8d095a9417" // v2.12.3
 
 	// ArgoCDDefaultBackupKeyLength is the length of the generated default backup key.
 	ArgoCDDefaultBackupKeyLength = 32
@@ -119,7 +128,7 @@ const (
 	ArgoCDDefaultExportJobImage = "quay.io/argoprojlabs/argocd-operator-util"
 
 	// ArgoCDDefaultExportJobVersion is the export job container image tag to use when not specified.
-	ArgoCDDefaultExportJobVersion = "sha256:6f80965a2bef1c80875be0995b18d9be5a6ad4af841cbc170ed3c60101a7deb2" // 0.5.0
+	ArgoCDDefaultExportJobVersion = "sha256:43f74879ce38af1e0ce37dc159332efd282b63da3eda43e71de9cecfa45df153" // 0.12.0
 
 	// ArgoCDDefaultExportLocalCapicity is the default capacity to use for local export.
 	ArgoCDDefaultExportLocalCapicity = "2Gi"
@@ -129,39 +138,6 @@ const (
 
 	// ArgoCDDefaultGAAnonymizeUsers is the default value for anonymizing google analytics users.
 	ArgoCDDefaultGAAnonymizeUsers = false
-
-	// ArgoCDDefaultGrafanaAdminUsername is the Grafana admin username to use when not specified.
-	ArgoCDDefaultGrafanaAdminUsername = "admin"
-
-	// ArgoCDDefaultGrafanaAdminPasswordLength is the length of the generated default Grafana admin password.
-	ArgoCDDefaultGrafanaAdminPasswordLength = 32
-
-	// ArgoCDDefaultGrafanaAdminPasswordNumDigits is the number of digits to use for the generated default Grafana admin password.
-	ArgoCDDefaultGrafanaAdminPasswordNumDigits = 5
-
-	// ArgoCDDefaultGrafanaAdminPasswordNumSymbols is the number of symbols to use for the generated default Grafana admin password.
-	ArgoCDDefaultGrafanaAdminPasswordNumSymbols = 5
-
-	// ArgoCDDefaultGrafanaImage is the Grafana container image to use when not specified.
-	ArgoCDDefaultGrafanaImage = "grafana/grafana"
-
-	// ArgoCDDefaultGrafanaReplicas is the default Grafana replica count.
-	ArgoCDDefaultGrafanaReplicas = int32(1)
-
-	// ArgoCDDefaultGrafanaSecretKeyLength is the length of the generated default Grafana secret key.
-	ArgoCDDefaultGrafanaSecretKeyLength = 20
-
-	// ArgoCDDefaultGrafanaSecretKeyNumDigits is the number of digits to use for the generated default Grafana secret key.
-	ArgoCDDefaultGrafanaSecretKeyNumDigits = 5
-
-	// ArgoCDDefaultGrafanaSecretKeyNumSymbols is the number of symbols to use for the generated default Grafana secret key.
-	ArgoCDDefaultGrafanaSecretKeyNumSymbols = 0
-
-	// ArgoCDDefaultGrafanaConfigPath is the default Grafana configuration directory when not specified.
-	ArgoCDDefaultGrafanaConfigPath = "/var/lib/grafana"
-
-	// ArgoCDDefaultGrafanaVersion is the Grafana container image tag to use when not specified.
-	ArgoCDDefaultGrafanaVersion = "sha256:afef23a1b4cf159ec3180aac3ad693c10e560657313bfe3ec81f344ace6d2f05" // 6.7.2
 
 	// ArgoCDDefaultHelpChatURL is the default help chat URL.
 	ArgoCDDefaultHelpChatURL = ""
@@ -255,6 +231,12 @@ const (
 	// ArgoCDDefaultResourceInclusions is the default resource inclusions.
 	ArgoCDDefaultResourceInclusions = ""
 
+	// ArgoCDExtensionInstallerImage is the default image for ArgoCD Extension Installer that can be used to install UI extensions like Rollouts extension.
+	ArgoCDExtensionInstallerImage = "quay.io/argoprojlabs/argocd-extension-installer:v0.0.8"
+
+	// ArgoRolloutsExtensionURL is the URL used to download the extension.js file from the latest rollout-extension tar release
+	ArgoRolloutsExtensionURL = "https://github.com/argoproj-labs/rollout-extension/releases/download/v0.3.6/extension.tar"
+
 	// ArgoCDDefaultRSAKeySize is the default RSA key size when not specified.
 	ArgoCDDefaultRSAKeySize = 2048
 
@@ -304,8 +286,20 @@ gitlab.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCsj2bNKTBSpIYDEGk9KxsGh3mySTRgM
 ssh.dev.azure.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H
 vs-ssh.visualstudio.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H
 `
+	// RedisDefaultAdminPasswordLength is the length of the generated default redis admin password.
+	RedisDefaultAdminPasswordLength = 16
+
+	// RedisDefaultAdminPasswordNumDigits is the number of digits to use for the generated default redis admin password.
+	RedisDefaultAdminPasswordNumDigits = 5
+
+	// RedisDefaultAdminPasswordNumSymbols is the number of symbols to use for the generated default redis admin password.
+	RedisDefaultAdminPasswordNumSymbols = 0
+
 	// OperatorMetricsPort is the port that is used to expose default controller-runtime metrics for the operator pod.
 	OperatorMetricsPort = 8080
+
+	// NotificationsControllerMetricsPort is the port that is used to expose notifications controller metrics.
+	NotificationsControllerMetricsPort = 9001
 )
 
 // DefaultLabels returns the default set of labels for controllers.

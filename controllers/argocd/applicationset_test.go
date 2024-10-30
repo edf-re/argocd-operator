@@ -16,6 +16,7 @@ package argocd
 
 import (
 	"context"
+	"os"
 	"sort"
 	"testing"
 
@@ -23,12 +24,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	cntrlClient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	"github.com/argoproj-labs/argocd-operator/common"
@@ -98,14 +103,14 @@ func TestReconcileApplicationSet_CreateDeployments(t *testing.T) {
 		deployment))
 
 	// Ensure the created Deployment has the expected properties
-	checkExpectedDeploymentValues(t, r, deployment, &sa, a)
+	checkExpectedDeploymentValues(t, r, deployment, &sa, nil, nil, a)
 }
 
-func checkExpectedDeploymentValues(t *testing.T, r *ReconcileArgoCD, deployment *appsv1.Deployment, sa *corev1.ServiceAccount, a *argoproj.ArgoCD) {
+func checkExpectedDeploymentValues(t *testing.T, r *ReconcileArgoCD, deployment *appsv1.Deployment, sa *corev1.ServiceAccount, extraVolumes *[]corev1.Volume, extraVolumeMounts *[]corev1.VolumeMount, a *argoproj.ArgoCD) {
 	assert.Equal(t, deployment.Spec.Template.Spec.ServiceAccountName, sa.ObjectMeta.Name)
 	appsetAssertExpectedLabels(t, &deployment.ObjectMeta)
 
-	want := []corev1.Container{applicationSetContainer(a, false)}
+	want := []corev1.Container{r.applicationSetContainer(a, false)}
 
 	if diff := cmp.Diff(want, deployment.Spec.Template.Spec.Containers); diff != "" {
 		t.Fatalf("failed to reconcile applicationset-controller deployment containers:\n%s", diff)
@@ -169,8 +174,44 @@ func checkExpectedDeploymentValues(t *testing.T, r *ReconcileArgoCD, deployment 
 		})
 	}
 
+	if extraVolumes != nil {
+		volumes = append(volumes, *extraVolumes...)
+	}
+
 	if diff := cmp.Diff(volumes, deployment.Spec.Template.Spec.Volumes); diff != "" {
 		t.Fatalf("failed to reconcile applicationset-controller deployment volumes:\n%s", diff)
+	}
+
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "ssh-known-hosts",
+			MountPath: "/app/config/ssh",
+		},
+		{
+			Name:      "tls-certs",
+			MountPath: "/app/config/tls",
+		},
+		{
+			Name:      "gpg-keys",
+			MountPath: "/app/config/gpg/source",
+		},
+		{
+			Name:      "gpg-keyring",
+			MountPath: "/app/config/gpg/keys",
+		},
+		{
+			Name:      "tmp",
+			MountPath: "/tmp",
+		},
+	}
+
+	if extraVolumeMounts != nil {
+		volumeMounts = append(volumeMounts, *extraVolumeMounts...)
+	}
+
+	// Verify VolumeMounts
+	if diff := cmp.Diff(volumeMounts, deployment.Spec.Template.Spec.Containers[0].VolumeMounts); diff != "" {
+		t.Fatalf("failed to reconcile applicationset-controller deployment volume mounts:\n%s", diff)
 	}
 
 	expectedSelector := &metav1.LabelSelector{
@@ -244,6 +285,61 @@ func TestReconcileApplicationSetProxyConfiguration(t *testing.T) {
 
 }
 
+func TestReconcileApplicationSetVolumes(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+
+	extraVolumes := []corev1.Volume{
+		{
+			Name: "example-volume",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+	}
+
+	extraVolumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "example-volume",
+			MountPath: "/mnt/data",
+		},
+	}
+
+	a := makeTestArgoCD()
+	a.Spec.ApplicationSet = &argoproj.ArgoCDApplicationSet{
+		Volumes:      extraVolumes,
+		VolumeMounts: extraVolumeMounts,
+	}
+
+	resObjs := []client.Object{a}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	sa := corev1.ServiceAccount{}
+
+	// Reconcile the ApplicationSet deployment
+	assert.NoError(t, r.reconcileApplicationSetDeployment(a, &sa))
+
+	// Get the deployment after reconciliation
+	deployment := &appsv1.Deployment{}
+	err := r.Client.Get(
+		context.TODO(),
+		types.NamespacedName{
+			Name:      "argocd-applicationset-controller",
+			Namespace: a.Namespace,
+		},
+		deployment,
+	)
+	if err != nil {
+		t.Fatalf("failed to get deployment: %v", err)
+	}
+
+	// Ensure the created Deployment has the expected properties
+	checkExpectedDeploymentValues(t, r, deployment, &sa, &extraVolumes, &extraVolumeMounts, a)
+}
+
 func TestReconcileApplicationSet_UpdateExistingDeployments(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 	a := makeTestArgoCD()
@@ -289,7 +385,7 @@ func TestReconcileApplicationSet_UpdateExistingDeployments(t *testing.T) {
 		deployment))
 
 	// Ensure the updated Deployment has the expected properties
-	checkExpectedDeploymentValues(t, r, deployment, &sa, a)
+	checkExpectedDeploymentValues(t, r, deployment, &sa, nil, nil, a)
 
 }
 
@@ -320,7 +416,7 @@ func TestReconcileApplicationSet_Deployments_resourceRequirements(t *testing.T) 
 	assert.Equal(t, deployment.Spec.Template.Spec.ServiceAccountName, sa.ObjectMeta.Name)
 	appsetAssertExpectedLabels(t, &deployment.ObjectMeta)
 
-	containerWant := []corev1.Container{applicationSetContainer(a, false)}
+	containerWant := []corev1.Container{r.applicationSetContainer(a, false)}
 
 	if diff := cmp.Diff(containerWant, deployment.Spec.Template.Spec.Containers); diff != "" {
 		t.Fatalf("failed to reconcile argocd-server deployment:\n%s", diff)
@@ -339,9 +435,31 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 	tests := []struct {
 		name                   string
 		appSetField            *argoproj.ArgoCDApplicationSet
+		argocdField            argoproj.ArgoCDSpec
 		envVars                map[string]string
 		expectedContainerImage string
 	}{
+		{
+			name:        "fields are set in argocd spec and not on appsetspec",
+			appSetField: &argoproj.ArgoCDApplicationSet{},
+			argocdField: argoproj.ArgoCDSpec{
+				Image:   "test",
+				Version: "sha256:b835999eb5cf75d01a2678cd971095926d9c2566c9ffe746d04b83a6a0a2849f",
+			},
+			expectedContainerImage: "test@sha256:b835999eb5cf75d01a2678cd971095926d9c2566c9ffe746d04b83a6a0a2849f",
+		},
+		{
+			name: "fields are set in both argocdSpec and on appsetSpec",
+			appSetField: &argoproj.ArgoCDApplicationSet{
+				Image:   "custom-image",
+				Version: "sha256:b835999eb5cf75d01a2678cd971095926d9c2566c9ffe746d04b83a6a0a2849f",
+			},
+			argocdField: argoproj.ArgoCDSpec{
+				Image:   "test",
+				Version: "sha256:b835999eb5cf75d01a2678cd9710952566c9ffe746d04b83a6a0a2849f926d9c",
+			},
+			expectedContainerImage: "custom-image@sha256:b835999eb5cf75d01a2678cd971095926d9c2566c9ffe746d04b83a6a0a2849f",
+		},
 		{
 			name:                   "unspecified fields should use default",
 			appSetField:            &argoproj.ArgoCDApplicationSet{},
@@ -406,6 +524,11 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 			cm := newConfigMapWithName(getCAConfigMapName(a), a)
 			r.Client.Create(context.Background(), cm, &client.CreateOptions{})
 
+			if test.argocdField.Image != "" {
+				a.Spec.Image = test.argocdField.Image
+				a.Spec.Version = test.argocdField.Version
+			}
+
 			a.Spec.ApplicationSet = test.appSetField
 
 			sa := corev1.ServiceAccount{}
@@ -422,10 +545,102 @@ func TestReconcileApplicationSet_Deployments_SpecOverride(t *testing.T) {
 
 			specImage := deployment.Spec.Template.Spec.Containers[0].Image
 			assert.Equal(t, test.expectedContainerImage, specImage)
-			checkExpectedDeploymentValues(t, r, deployment, &sa, a)
+			checkExpectedDeploymentValues(t, r, deployment, &sa, nil, nil, a)
 		})
 	}
 
+}
+
+func TestReconcileApplicationSet_Deployments_Command(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+
+	tests := []struct {
+		name           string
+		argocdSpec     argoproj.ArgoCDSpec
+		expectedCmd    []string
+		notExpectedCmd []string
+	}{
+		{
+			name: "Appset in any namespaces without scm provider list",
+			argocdSpec: argoproj.ArgoCDSpec{
+				ApplicationSet: &argoproj.ArgoCDApplicationSet{
+					SourceNamespaces: []string{"foo", "bar"},
+				},
+				SourceNamespaces: []string{"foo", "bar"},
+			},
+			expectedCmd: []string{"--applicationset-namespaces", "foo,bar", "--enable-scm-providers=false"},
+		},
+		{
+			name: "with SCM provider list",
+			argocdSpec: argoproj.ArgoCDSpec{
+				ApplicationSet: &argoproj.ArgoCDApplicationSet{
+					SourceNamespaces: []string{"foo"},
+					SCMProviders:     []string{"github.com"},
+				},
+				SourceNamespaces: []string{"foo", "bar"},
+			},
+			expectedCmd: []string{"--applicationset-namespaces", "foo", "--allowed-scm-providers", "github.com"},
+		},
+		{
+			name: "Appsets namespaces without Apps namespaces",
+			argocdSpec: argoproj.ArgoCDSpec{
+				ApplicationSet: &argoproj.ArgoCDApplicationSet{
+					SourceNamespaces: []string{"foo"},
+					SCMProviders:     []string{"github.com"},
+				},
+				SourceNamespaces: []string{},
+			},
+			expectedCmd:    []string{"--allowed-scm-providers", "github.com"},
+			notExpectedCmd: []string{"--applicationset-namespaces", "foo"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+
+			a := makeTestArgoCD()
+			ns1 := v1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+			}
+			ns2 := v1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "bar",
+				},
+			}
+			resObjs := []client.Object{a, &ns1, &ns2}
+			subresObjs := []client.Object{a}
+			runtimeObjs := []runtime.Object{}
+			sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+			cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+			r := makeTestReconciler(cl, sch)
+			cm := newConfigMapWithName(getCAConfigMapName(a), a)
+			r.Client.Create(context.Background(), cm, &client.CreateOptions{})
+
+			a.Spec = test.argocdSpec
+
+			sa := corev1.ServiceAccount{}
+			assert.NoError(t, r.reconcileApplicationSetDeployment(a, &sa))
+
+			deployment := &appsv1.Deployment{}
+			assert.NoError(t, r.Client.Get(
+				context.TODO(),
+				types.NamespacedName{
+					Name:      "argocd-applicationset-controller",
+					Namespace: a.Namespace,
+				},
+				deployment))
+
+			cmds := deployment.Spec.Template.Spec.Containers[0].Command
+			for _, c := range test.expectedCmd {
+				assert.True(t, contains(cmds, c))
+			}
+			for _, c := range test.notExpectedCmd {
+				assert.False(t, contains(cmds, c))
+			}
+		})
+	}
 }
 
 func TestReconcileApplicationSet_ServiceAccount(t *testing.T) {
@@ -437,6 +652,10 @@ func TestReconcileApplicationSet_ServiceAccount(t *testing.T) {
 	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
 	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
 	r := makeTestReconciler(cl, sch)
+
+	a.Spec.ApplicationSet = &argoproj.ArgoCDApplicationSet{
+		Enabled: boolPtr(true),
+	}
 
 	retSa, err := r.reconcileApplicationSetServiceAccount(a)
 	assert.NoError(t, err)
@@ -455,6 +674,214 @@ func TestReconcileApplicationSet_ServiceAccount(t *testing.T) {
 	appsetAssertExpectedLabels(t, &sa.ObjectMeta)
 }
 
+// Test creation/cleanup of applicationset-controller clusterrole & clusterrolebinding
+func TestReconcileApplicationSet_ClusterRBACCreationAndCleanup(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+	a := makeTestArgoCD()
+
+	resName := "argocd-argocd-argocd-applicationset-controller"
+
+	resObjs := []client.Object{a}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	a.Spec.ApplicationSet = &argoproj.ArgoCDApplicationSet{
+		Enabled: boolPtr(true),
+	}
+
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "sa-name"}}
+
+	// test: ArgoCD is not cluster-scoped, resources shouldn't be created
+	role, err := r.reconcileApplicationSetClusterRole(a)
+	assert.NoError(t, err)
+	err = r.reconcileApplicationSetClusterRoleBinding(a, role, sa)
+	assert.NoError(t, err)
+
+	// clusterrole should not be created
+	cr := &rbacv1.ClusterRole{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName}, cr)
+	assert.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+
+	// clusterrolebinding should not be created
+	crb := &rbacv1.ClusterRoleBinding{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName}, crb)
+	assert.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+
+	// test: make ArgoCD cluster-scoped, resources should be created
+	os.Setenv("ARGOCD_CLUSTER_CONFIG_NAMESPACES", a.Namespace)
+
+	role, err = r.reconcileApplicationSetClusterRole(a)
+	assert.NoError(t, err)
+	err = r.reconcileApplicationSetClusterRoleBinding(a, role, sa)
+	assert.NoError(t, err)
+
+	// clusterrole should be created
+	cr = &rbacv1.ClusterRole{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName}, cr)
+	assert.NoError(t, err)
+
+	// clusterrolebinding should be created
+	crb = &rbacv1.ClusterRoleBinding{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName}, crb)
+	assert.NoError(t, err)
+	assert.Equal(t, crb.RoleRef.Name, cr.Name)
+	assert.Equal(t, crb.Subjects[0].Name, sa.Name)
+
+	// test: make ArgoCD namespaced-scope, existing resources should be deleted
+	os.Setenv("ARGOCD_CLUSTER_CONFIG_NAMESPACES", "")
+	role, err = r.reconcileApplicationSetClusterRole(a)
+	assert.NoError(t, err)
+	err = r.reconcileApplicationSetClusterRoleBinding(a, role, sa)
+	assert.NoError(t, err)
+
+	// clusterrole should not exists
+	cr = &rbacv1.ClusterRole{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName}, cr)
+	assert.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+
+	// clusterrolebinding should not exists
+	crb = &rbacv1.ClusterRoleBinding{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName}, crb)
+	assert.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+// Test creation/cleanup of applicationset-controller role & rolebinding in source namespaces
+// Appset resources are only created if target source ns is subset of apps source namespaces
+func TestReconcileApplicationSet_SourceNamespacesRBACCreation(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+
+	tests := []struct {
+		name         string
+		argoCDSpec   argoproj.ArgoCDSpec
+		expectErr    bool
+		existInNs    []string
+		notExistInNs []string
+	}{
+		{
+			name: "No appset & app source namespaces", // no resources should be created
+			argoCDSpec: argoproj.ArgoCDSpec{
+				ApplicationSet:   nil,
+				SourceNamespaces: []string(nil),
+			},
+			expectErr: false,
+		},
+		{
+			name: "appset source ns not subset of app source ns", // resources shouldn't be created in allowed namespaces
+			argoCDSpec: argoproj.ArgoCDSpec{
+				ApplicationSet: &argoproj.ArgoCDApplicationSet{
+					SourceNamespaces: []string{"foo", "bar"},
+				},
+				SourceNamespaces: []string(nil),
+			},
+			expectErr:    false,
+			existInNs:    []string{},
+			notExistInNs: []string{"foo", "bar"},
+		},
+		{
+			name: "appset source ns subset of app source ns ", // resources should be created is all appset ns
+			argoCDSpec: argoproj.ArgoCDSpec{
+				ApplicationSet: &argoproj.ArgoCDApplicationSet{
+					SourceNamespaces: []string{"foo", "bar"},
+				},
+				SourceNamespaces: []string{"foo", "bar"},
+			},
+			expectErr:    false,
+			existInNs:    []string{"foo", "bar"},
+			notExistInNs: []string{},
+		},
+		{
+			name: "appset source ns partial subset of app source ns ", // resources should be created only in ns part of app source ns
+			argoCDSpec: argoproj.ArgoCDSpec{
+				ApplicationSet: &argoproj.ArgoCDApplicationSet{
+					SourceNamespaces: []string{"foo", "bar"},
+				},
+				SourceNamespaces: []string{"foo"},
+			},
+			expectErr:    false,
+			existInNs:    []string{"foo"},
+			notExistInNs: []string{"bar"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+
+			a := makeTestArgoCD()
+			resObjs := []client.Object{a}
+			subresObjs := []client.Object{a}
+			runtimeObjs := []runtime.Object{}
+			sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+			cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+			r := makeTestReconciler(cl, sch)
+			a.Spec = test.argoCDSpec
+
+			for _, ns := range append(test.existInNs, test.notExistInNs...) {
+				createNamespace(r, ns, "")
+			}
+
+			err := r.reconcileApplicationSetSourceNamespacesResources(a)
+			if test.expectErr {
+				assert.Error(t, err)
+			}
+
+			// resources for applicationset-controller should be created in target ns
+			for _, ns := range test.existInNs {
+				resName := getResourceNameForApplicationSetSourceNamespaces(a)
+
+				role := &rbacv1.Role{}
+				err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns}, role)
+				assert.NoError(t, err)
+
+				roleBinding := &rbacv1.RoleBinding{}
+				err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns}, roleBinding)
+				assert.NoError(t, err)
+			}
+
+			// appset tracker label should be added on the target namespace
+			for _, ns := range test.existInNs {
+				namespace := &v1.Namespace{}
+				err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: ns}, namespace)
+				assert.NoError(t, err)
+				val, found := namespace.Labels[common.ArgoCDApplicationSetManagedByClusterArgoCDLabel]
+				assert.True(t, found)
+				assert.Equal(t, a.Namespace, val)
+			}
+
+			// resources for applicationset-controller shouldn't be created in target ns
+			for _, ns := range test.notExistInNs {
+				resName := getResourceNameForApplicationSetSourceNamespaces(a)
+
+				role := &rbacv1.Role{}
+				err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns}, role)
+				assert.Error(t, err)
+				assert.True(t, apierrors.IsNotFound(err))
+
+				roleBinding := &rbacv1.RoleBinding{}
+				err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns}, roleBinding)
+				assert.Error(t, err)
+				assert.True(t, apierrors.IsNotFound(err))
+			}
+
+			// appset tracker label shouldn't be added on the target namespace
+			for _, ns := range test.notExistInNs {
+				namespace := &v1.Namespace{}
+				err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: ns}, namespace)
+				assert.NoError(t, err)
+				_, found := namespace.Labels[common.ArgoCDApplicationSetManagedByClusterArgoCDLabel]
+				assert.False(t, found)
+			}
+
+		})
+	}
+}
+
 func TestReconcileApplicationSet_Role(t *testing.T) {
 	logf.SetLogger(ZapLogger(true))
 	a := makeTestArgoCD()
@@ -465,6 +892,10 @@ func TestReconcileApplicationSet_Role(t *testing.T) {
 	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
 	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
 	r := makeTestReconciler(cl, sch)
+
+	a.Spec.ApplicationSet = &argoproj.ArgoCDApplicationSet{
+		Enabled: boolPtr(true),
+	}
 
 	roleRet, err := r.reconcileApplicationSetRole(a)
 	assert.NoError(t, err)
@@ -491,6 +922,7 @@ func TestReconcileApplicationSet_Role(t *testing.T) {
 		"applicationsets",
 		"appprojects",
 		"applicationsets/finalizers",
+		"leases",
 	}
 
 	foundResources := []string{}
@@ -517,6 +949,10 @@ func TestReconcileApplicationSet_RoleBinding(t *testing.T) {
 	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
 	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
 	r := makeTestReconciler(cl, sch)
+
+	a.Spec.ApplicationSet = &argoproj.ArgoCDApplicationSet{
+		Enabled: boolPtr(true),
+	}
 
 	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "role-name"}}
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "sa-name"}}
@@ -722,4 +1158,159 @@ func TestArgoCDApplicationSetEnv(t *testing.T) {
 		deployment))
 
 	assert.Equal(t, defaultEnv, deployment.Spec.Template.Spec.Containers[0].Env)
+}
+
+func TestArgoCDApplicationSet_getApplicationSetSourceNamespaces(t *testing.T) {
+	logf.SetLogger(ZapLogger(true))
+
+	tests := []struct {
+		name        string
+		appSetField *argoproj.ArgoCDApplicationSet
+		expected    []string
+	}{
+		{
+			name:        "Appsets not enabled",
+			appSetField: nil,
+			expected:    []string(nil),
+		},
+		{
+			name: "No appset source namespaces",
+			appSetField: &argoproj.ArgoCDApplicationSet{
+				Enabled: boolPtr(true),
+			},
+			expected: []string(nil),
+		},
+		{
+			name: "Appset source namespaces",
+			appSetField: &argoproj.ArgoCDApplicationSet{
+				SourceNamespaces: []string{"foo", "bar"},
+			},
+			expected: []string{"foo", "bar"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+
+			a := makeTestArgoCD()
+			resObjs := []client.Object{a}
+			subresObjs := []client.Object{a}
+			runtimeObjs := []runtime.Object{}
+			sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+			cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+			r := makeTestReconciler(cl, sch)
+			cm := newConfigMapWithName(getCAConfigMapName(a), a)
+			r.Client.Create(context.Background(), cm, &client.CreateOptions{})
+
+			a.Spec.ApplicationSet = test.appSetField
+
+			actual := r.getApplicationSetSourceNamespaces(a)
+			assert.Equal(t, test.expected, actual)
+		})
+	}
+}
+
+func TestArgoCDApplicationSet_setManagedApplicationSetSourceNamespaces(t *testing.T) {
+	a := makeTestArgoCD()
+	ns1 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-1",
+			Labels: map[string]string{
+				common.ArgoCDApplicationSetManagedByClusterArgoCDLabel: testNamespace,
+			},
+		},
+	}
+	ns2 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-2",
+		},
+	}
+
+	resObjs := []client.Object{a, &ns1, &ns2}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	err := r.setManagedApplicationSetSourceNamespaces(a)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 1, len(r.ManagedApplicationSetSourceNamespaces))
+	assert.Contains(t, r.ManagedApplicationSetSourceNamespaces, "test-namespace-1")
+}
+
+func TestArgoCDApplicationSet_removeUnmanagedApplicationSetSourceNamespaceResources(t *testing.T) {
+	ns1 := "foo"
+	ns2 := "bar"
+	a := makeTestArgoCD()
+	a.Spec = argoproj.ArgoCDSpec{
+		SourceNamespaces: []string{ns1, ns2},
+		ApplicationSet: &argoproj.ArgoCDApplicationSet{
+			SourceNamespaces: []string{ns1, ns2},
+		},
+	}
+
+	resObjs := []client.Object{a}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	createNamespace(r, ns1, "")
+	createNamespace(r, ns2, "")
+
+	// create resources
+	err := r.reconcileApplicationSetSourceNamespacesResources(a)
+	assert.NoError(t, err)
+
+	// remove appset ns
+	a.Spec = argoproj.ArgoCDSpec{
+		SourceNamespaces: []string{ns2},
+		ApplicationSet: &argoproj.ArgoCDApplicationSet{
+			SourceNamespaces: []string{ns1, ns2},
+		},
+	}
+
+	// clean up unmanaged namespaces resources
+	err = r.removeUnmanagedApplicationSetSourceNamespaceResources(a)
+	assert.NoError(t, err)
+
+	// resources shouldn't exist in ns1
+	resName := getResourceNameForApplicationSetSourceNamespaces(a)
+
+	role := &rbacv1.Role{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns1}, role)
+	assert.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+
+	roleBinding := &rbacv1.RoleBinding{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns1}, roleBinding)
+	assert.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
+
+	// appset tracking label should be removed
+	namespace := &v1.Namespace{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: ns1}, namespace)
+	assert.NoError(t, err)
+	_, found := namespace.Labels[common.ArgoCDApplicationSetManagedByClusterArgoCDLabel]
+	assert.False(t, found)
+
+	// resources in ns2 shouldn't be touched
+
+	role = &rbacv1.Role{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns2}, role)
+	assert.NoError(t, err)
+
+	roleBinding = &rbacv1.RoleBinding{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: resName, Namespace: ns2}, roleBinding)
+	assert.NoError(t, err)
+
+	namespace = &v1.Namespace{}
+	err = r.Client.Get(context.TODO(), cntrlClient.ObjectKey{Name: ns2}, namespace)
+	assert.NoError(t, err)
+	val, found := namespace.Labels[common.ArgoCDApplicationSetManagedByClusterArgoCDLabel]
+	assert.True(t, found)
+	assert.Equal(t, a.Namespace, val)
 }

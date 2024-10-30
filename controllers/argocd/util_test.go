@@ -3,9 +3,11 @@ package argocd
 import (
 	"context"
 	b64 "encoding/base64"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,6 +17,7 @@ import (
 	"github.com/argoproj-labs/argocd-operator/common"
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
 
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,13 +25,43 @@ import (
 )
 
 const (
-	dexTestImage          = "testing/dex:latest"
-	argoTestImage         = "testing/argocd:latest"
-	grafanaTestImage      = "testing/grafana:latest"
-	redisTestImage        = "testing/redis:latest"
-	redisHATestImage      = "testing/redis:latest-ha"
-	redisHAProxyTestImage = "testing/redis-ha-haproxy:latest-ha"
+	dexTestImage              = "testing/dex:latest"
+	argoTestImage             = "testing/argocd:latest"
+	argoTestImageOtherVersion = "testing/argocd:test"
+	redisTestImage            = "testing/redis:latest"
+	redisHATestImage          = "testing/redis:latest-ha"
+	redisHAProxyTestImage     = "testing/redis-ha-haproxy:latest-ha"
 )
+
+func parallelismLimit(n int32) argoCDOpt {
+	return func(a *argoproj.ArgoCD) {
+		a.Spec.Controller.ParallelismLimit = n
+	}
+}
+
+func logFormat(f string) argoCDOpt {
+	return func(a *argoproj.ArgoCD) {
+		a.Spec.Controller.LogFormat = f
+	}
+}
+
+func logLevel(l string) argoCDOpt {
+	return func(a *argoproj.ArgoCD) {
+		a.Spec.Controller.LogLevel = l
+	}
+}
+
+func extraCommandArgs(l []string) argoCDOpt {
+	return func(a *argoproj.ArgoCD) {
+		a.Spec.Controller.ExtraCommandArgs = l
+	}
+}
+
+func appSync(s int) argoCDOpt {
+	return func(a *argoproj.ArgoCD) {
+		a.Spec.Controller.AppSync = &metav1.Duration{Duration: time.Second * time.Duration(s)}
+	}
+}
 
 var imageTests = []struct {
 	name      string
@@ -86,25 +119,32 @@ var imageTests = []struct {
 		},
 	},
 	{
-		name:      "grafana default configuration",
-		imageFunc: getGrafanaContainerImage,
-		want:      argoutil.CombineImageTag(common.ArgoCDDefaultGrafanaImage, common.ArgoCDDefaultGrafanaVersion),
+		name:      "repo default configuration",
+		imageFunc: getRepoServerContainerImage,
+		want:      argoutil.CombineImageTag(common.ArgoCDDefaultArgoImage, common.ArgoCDDefaultArgoVersion),
 	},
 	{
-		name:      "grafana spec configuration",
-		imageFunc: getGrafanaContainerImage,
-		want:      grafanaTestImage,
-		opts: []argoCDOpt{func(a *argoproj.ArgoCD) {
-			a.Spec.Grafana.Image = "testing/grafana"
-			a.Spec.Grafana.Version = "latest"
+		name:      "repo spec configuration",
+		imageFunc: getRepoServerContainerImage,
+		want:      argoTestImage, opts: []argoCDOpt{func(a *argoproj.ArgoCD) {
+			a.Spec.Repo.Image = "testing/argocd"
+			a.Spec.Repo.Version = "latest"
 		}},
 	},
 	{
-		name:      "grafana env configuration",
-		imageFunc: getGrafanaContainerImage,
-		want:      grafanaTestImage,
+		name:      "repo configuration fallback spec",
+		imageFunc: getRepoServerContainerImage,
+		want:      argoTestImageOtherVersion, opts: []argoCDOpt{func(a *argoproj.ArgoCD) {
+			a.Spec.Image = "testing/argocd"
+			a.Spec.Version = "test"
+		}},
+	},
+	{
+		name:      "argo env configuration",
+		imageFunc: getRepoServerContainerImage,
+		want:      argoTestImage,
 		pre: func(t *testing.T) {
-			t.Setenv(common.ArgoCDGrafanaImageEnvName, grafanaTestImage)
+			t.Setenv(common.ArgoCDImageEnvName, argoTestImage)
 		},
 	},
 	{
@@ -321,6 +361,129 @@ func TestArgoCDInstanceSelector(t *testing.T) {
 }
 
 func TestGetArgoApplicationControllerCommand(t *testing.T) {
+
+	defaultResult := []string{
+		"argocd-application-controller",
+		"--operation-processors",
+		"10",
+		"--redis",
+		"argocd-redis.argocd.svc.cluster.local:6379",
+		"--repo-server",
+		"argocd-repo-server.argocd.svc.cluster.local:8081",
+		"--status-processors",
+		"20",
+		"--kubectl-parallelism-limit",
+		"10",
+		"--loglevel",
+		"info",
+		"--logformat",
+		"text",
+	}
+
+	controllerProcesorsChangedResult := func(n string) []string {
+		return []string{
+			"argocd-application-controller",
+			"--operation-processors",
+			"10",
+			"--redis",
+			"argocd-redis.argocd.svc.cluster.local:6379",
+			"--repo-server",
+			"argocd-repo-server.argocd.svc.cluster.local:8081",
+			"--status-processors",
+			n,
+			"--kubectl-parallelism-limit",
+			"10",
+			"--loglevel",
+			"info",
+			"--logformat",
+			"text",
+		}
+	}
+
+	operationProcesorsChangedResult := func(n string) []string {
+		return []string{
+			"argocd-application-controller",
+			"--operation-processors",
+			n,
+			"--redis",
+			"argocd-redis.argocd.svc.cluster.local:6379",
+			"--repo-server",
+			"argocd-repo-server.argocd.svc.cluster.local:8081",
+			"--status-processors",
+			"20",
+			"--kubectl-parallelism-limit",
+			"10",
+			"--loglevel",
+			"info",
+			"--logformat",
+			"text",
+		}
+	}
+
+	parallelismLimitChangedResult := func(n string) []string {
+		return []string{
+			"argocd-application-controller",
+			"--operation-processors",
+			"10",
+			"--redis",
+			"argocd-redis.argocd.svc.cluster.local:6379",
+			"--repo-server",
+			"argocd-repo-server.argocd.svc.cluster.local:8081",
+			"--status-processors",
+			"20",
+			"--kubectl-parallelism-limit",
+			n,
+			"--loglevel",
+			"info",
+			"--logformat",
+			"text",
+		}
+	}
+
+	logFormatChangedResult := func(f string) []string {
+		return []string{
+			"argocd-application-controller",
+			"--operation-processors",
+			"10",
+			"--redis",
+			"argocd-redis.argocd.svc.cluster.local:6379",
+			"--repo-server",
+			"argocd-repo-server.argocd.svc.cluster.local:8081",
+			"--status-processors",
+			"20",
+			"--kubectl-parallelism-limit",
+			"10",
+			"--loglevel",
+			"info",
+			"--logformat",
+			f,
+		}
+	}
+
+	logLevelChangedResult := func(l string) []string {
+		return []string{
+			"argocd-application-controller",
+			"--operation-processors",
+			"10",
+			"--redis",
+			"argocd-redis.argocd.svc.cluster.local:6379",
+			"--repo-server",
+			"argocd-repo-server.argocd.svc.cluster.local:8081",
+			"--status-processors",
+			"20",
+			"--kubectl-parallelism-limit",
+			"10",
+			"--loglevel",
+			l,
+			"--logformat",
+			"text",
+		}
+	}
+
+	extraCommandArgsChangedResult := func(l []string) []string {
+		return append(defaultResult, l...)
+	}
+
 	cmdTests := []struct {
 		name string
 		opts []argoCDOpt
@@ -329,86 +492,102 @@ func TestGetArgoApplicationControllerCommand(t *testing.T) {
 		{
 			"defaults",
 			[]argoCDOpt{},
-			[]string{
-				"argocd-application-controller",
-				"--operation-processors",
-				"10",
-				"--redis",
-				"argocd-redis.argocd.svc.cluster.local:6379",
-				"--repo-server",
-				"argocd-repo-server.argocd.svc.cluster.local:8081",
-				"--status-processors",
-				"20",
-				"--kubectl-parallelism-limit",
-				"10",
-				"--loglevel",
-				"info",
-				"--logformat",
-				"text",
-			},
+			defaultResult,
 		},
 		{
 			"configured status processors",
 			[]argoCDOpt{controllerProcessors(30)},
-			[]string{
-				"argocd-application-controller",
-				"--operation-processors",
-				"10",
-				"--redis",
-				"argocd-redis.argocd.svc.cluster.local:6379",
-				"--repo-server",
-				"argocd-repo-server.argocd.svc.cluster.local:8081",
-				"--status-processors",
-				"30",
-				"--kubectl-parallelism-limit",
-				"10",
-				"--loglevel",
-				"info",
-				"--logformat",
-				"text",
-			},
+			controllerProcesorsChangedResult("30"),
+		},
+		{
+			"configured status processors to zero",
+			[]argoCDOpt{controllerProcessors(0)},
+			defaultResult,
+		},
+		{
+			"configured status processors to be between zero and default",
+			[]argoCDOpt{controllerProcessors(10)},
+			controllerProcesorsChangedResult("10"),
 		},
 		{
 			"configured operation processors",
 			[]argoCDOpt{operationProcessors(15)},
-			[]string{
-				"argocd-application-controller",
-				"--operation-processors",
-				"15",
-				"--redis",
-				"argocd-redis.argocd.svc.cluster.local:6379",
-				"--repo-server",
-				"argocd-repo-server.argocd.svc.cluster.local:8081",
-				"--status-processors",
-				"20",
-				"--kubectl-parallelism-limit",
-				"10",
-				"--loglevel",
-				"info",
-				"--logformat",
-				"text",
-			},
+			operationProcesorsChangedResult("15"),
+		},
+		{
+			"configured operation processors to zero",
+			[]argoCDOpt{operationProcessors(0)},
+			defaultResult,
+		},
+		{
+			"configured operation processors to be between zero and ten",
+			[]argoCDOpt{operationProcessors(5)},
+			operationProcesorsChangedResult("5"),
 		},
 		{
 			"configured parallelism limit",
 			[]argoCDOpt{parallelismLimit(30)},
-			[]string{
-				"argocd-application-controller",
-				"--operation-processors",
-				"10",
-				"--redis",
-				"argocd-redis.argocd.svc.cluster.local:6379",
-				"--repo-server",
-				"argocd-repo-server.argocd.svc.cluster.local:8081",
-				"--status-processors",
-				"20",
-				"--kubectl-parallelism-limit",
-				"30",
-				"--loglevel",
-				"info",
-				"--logformat",
-				"text",
-			},
+			parallelismLimitChangedResult("30"),
+		},
+		{
+			"configured parallelism limit to zero",
+			[]argoCDOpt{parallelismLimit(0)},
+			defaultResult,
+		},
+		{
+			"configured invalid logformat",
+			[]argoCDOpt{logFormat("arbitrary")},
+			defaultResult,
+		},
+		{
+			"configured json logformat",
+			[]argoCDOpt{logFormat("json")},
+			logFormatChangedResult("json"),
+		},
+		{
+			"configured text logformat",
+			[]argoCDOpt{logFormat("text")},
+			logFormatChangedResult("text"),
+		},
+		{
+			"configured invalid loglevel",
+			[]argoCDOpt{logLevel("arbitrary")},
+			defaultResult,
+		},
+		{
+			"configured debug loglevel",
+			[]argoCDOpt{logLevel("debug")},
+			logLevelChangedResult("debug"),
+		},
+		{
+			"configured info loglevel",
+			[]argoCDOpt{logLevel("info")},
+			logLevelChangedResult("info"),
+		},
+		{
+			"configured warn loglevel",
+			[]argoCDOpt{logLevel("warn")},
+			logLevelChangedResult("warn"),
+		},
+		{
+			"configured error loglevel",
+			[]argoCDOpt{logLevel("error")},
+			logLevelChangedResult("error"),
+		},
+		{
+			"configured extraCommandArgs",
+			[]argoCDOpt{extraCommandArgs([]string{"--app-hard-resync", "--app-resync"})},
+			extraCommandArgsChangedResult([]string{"--app-hard-resync", "--app-resync"}),
+		},
+		{
+			"overriding default argument using extraCommandArgs",
+			[]argoCDOpt{extraCommandArgs([]string{"--operation-processors", "15"})},
+			defaultResult,
+		},
+		{
+			"configured empty extraCommandArgs",
+			[]argoCDOpt{extraCommandArgs([]string{})},
+			defaultResult,
 		},
 	}
 
@@ -418,6 +597,43 @@ func TestGetArgoApplicationControllerCommand(t *testing.T) {
 
 		if !reflect.DeepEqual(cmd, tt.want) {
 			t.Fatalf("got %#v, want %#v", cmd, tt.want)
+		}
+	}
+}
+
+func TestGetArgoApplicationContainerEnv(t *testing.T) {
+
+	sync60s := []v1.EnvVar{
+		{Name: "HOME", Value: "/home/argocd", ValueFrom: (*v1.EnvVarSource)(nil)},
+		{Name: "REDIS_PASSWORD", Value: "",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: fmt.Sprintf("argocd-redis-initial-password"),
+					},
+					Key: "admin.password",
+				},
+			}},
+		{Name: "ARGOCD_RECONCILIATION_TIMEOUT", Value: "60s", ValueFrom: (*v1.EnvVarSource)(nil)}}
+
+	cmdTests := []struct {
+		name string
+		opts []argoCDOpt
+		want []v1.EnvVar
+	}{
+		{
+			"configured apsync to 60s",
+			[]argoCDOpt{appSync(60)},
+			sync60s,
+		},
+	}
+
+	for _, tt := range cmdTests {
+		cr := makeTestArgoCD(tt.opts...)
+		env := getArgoControllerContainerEnv(cr, 1)
+
+		if !reflect.DeepEqual(env, tt.want) {
+			t.Fatalf("got %#v, want %#v", env, tt.want)
 		}
 	}
 }
@@ -658,6 +874,166 @@ func TestSetManagedSourceNamespaces(t *testing.T) {
 	assert.Contains(t, r.ManagedSourceNamespaces, "test-namespace-1")
 }
 
+func TestGetSourceNamespacesWithWildcardPatternNamespace(t *testing.T) {
+	a := makeTestArgoCD()
+	a.Spec = argoproj.ArgoCDSpec{
+		SourceNamespaces: []string{
+			"test*",
+		},
+	}
+	ns1 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-1",
+		},
+	}
+
+	ns2 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-2",
+		},
+	}
+	ns3 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "other-namespace",
+		},
+	}
+
+	resObjs := []client.Object{a, &ns1, &ns2, &ns3}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	sourceNamespaces, err := r.getSourceNamespaces(a)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(sourceNamespaces))
+	assert.Contains(t, sourceNamespaces, "test-namespace-1")
+	assert.Contains(t, sourceNamespaces, "test-namespace-2")
+	assert.NotContains(t, sourceNamespaces, "other-namespace")
+}
+
+func TestGetSourceNamespacesWithSpecificNamespace(t *testing.T) {
+	a := makeTestArgoCD()
+	a.Spec = argoproj.ArgoCDSpec{
+		SourceNamespaces: []string{
+			"test",
+		},
+	}
+	ns1 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test",
+		},
+	}
+	ns2 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-1",
+		},
+	}
+	ns3 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "other-namespace",
+		},
+	}
+
+	resObjs := []client.Object{a, &ns1, &ns2, &ns3}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	sourceNamespaces, err := r.getSourceNamespaces(a)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(sourceNamespaces))
+	assert.Contains(t, sourceNamespaces, "test")
+	assert.NotContains(t, sourceNamespaces, "test-namespace-1")
+	assert.NotContains(t, sourceNamespaces, "other-namespace")
+}
+
+func TestGetSourceNamespacesWithMultipleSourceNamespaces(t *testing.T) {
+	a := makeTestArgoCD()
+	a.Spec = argoproj.ArgoCDSpec{
+		SourceNamespaces: []string{
+			"test*",
+			"dev*",
+		},
+	}
+	ns1 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test",
+		},
+	}
+	ns2 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-1",
+		},
+	}
+	ns3 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "dev-namespace-1",
+		},
+	}
+	ns4 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "other-namespace",
+		},
+	}
+
+	resObjs := []client.Object{a, &ns1, &ns2, &ns3, &ns4}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	sourceNamespaces, err := r.getSourceNamespaces(a)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(sourceNamespaces))
+	assert.Contains(t, sourceNamespaces, "test")
+	assert.Contains(t, sourceNamespaces, "test-namespace-1")
+	assert.Contains(t, sourceNamespaces, "dev-namespace-1")
+	assert.NotContains(t, sourceNamespaces, "other-namespace")
+}
+
+func TestGetSourceNamespacesWithWildCardNamespace(t *testing.T) {
+	a := makeTestArgoCD()
+	a.Spec = argoproj.ArgoCDSpec{
+		SourceNamespaces: []string{
+			"*",
+		},
+	}
+	ns1 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-1",
+		},
+	}
+	ns2 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-namespace-2",
+		},
+	}
+	ns3 := v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "other-namespace",
+		},
+	}
+
+	resObjs := []client.Object{a, &ns1, &ns2, &ns3}
+	subresObjs := []client.Object{a}
+	runtimeObjs := []runtime.Object{}
+	sch := makeTestReconcilerScheme(argoproj.AddToScheme)
+	cl := makeTestReconcilerClient(sch, resObjs, subresObjs, runtimeObjs)
+	r := makeTestReconciler(cl, sch)
+
+	sourceNamespaces, err := r.getSourceNamespaces(a)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(sourceNamespaces))
+	assert.Contains(t, sourceNamespaces, "other-namespace")
+	assert.Contains(t, sourceNamespaces, "test-namespace-1")
+	assert.Contains(t, sourceNamespaces, "test-namespace-2")
+}
+
 func TestGenerateRandomString(t *testing.T) {
 
 	// verify the creation of unique strings
@@ -673,7 +1049,7 @@ func TestGenerateRandomString(t *testing.T) {
 	assert.Len(t, b, 20)
 }
 
-func generateEncodedPEM(t *testing.T, host string) []byte {
+func generateEncodedPEM(t *testing.T) []byte {
 	key, err := argoutil.NewPrivateKey()
 	assert.NoError(t, err)
 

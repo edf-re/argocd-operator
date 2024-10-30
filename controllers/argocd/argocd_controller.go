@@ -45,8 +45,10 @@ type ReconcileArgoCD struct {
 	client.Client
 	Scheme            *runtime.Scheme
 	ManagedNamespaces *corev1.NamespaceList
-	// Stores a list of SourceNamespaces as values
+	// Stores a list of ApplicationSourceNamespaces as keys
 	ManagedSourceNamespaces map[string]string
+	// Stores a list of ApplicationSetSourceNamespaces as keys
+	ManagedApplicationSetSourceNamespaces map[string]string
 	// Stores label selector used to reconcile a subset of ArgoCD
 	LabelSelector string
 }
@@ -69,6 +71,7 @@ var ActiveInstanceMap = make(map[string]string)
 //+kubebuilder:rbac:groups=batch,resources=cronjobs;jobs,verbs=*
 //+kubebuilder:rbac:groups=config.openshift.io,resources=clusterversions,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=*
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;delete;get;list;patch;update;watch;
 //+kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheuses;prometheusrules;servicemonitors,verbs=*
 //+kubebuilder:rbac:groups=route.openshift.io,resources=routes;routes/custom-host,verbs=*
 //+kubebuilder:rbac:groups=argoproj.io,resources=applications;appprojects,verbs=*
@@ -76,6 +79,8 @@ var ActiveInstanceMap = make(map[string]string)
 //+kubebuilder:rbac:groups="",resources=pods;pods/log,verbs=get
 //+kubebuilder:rbac:groups=template.openshift.io,resources=templates;templateinstances;templateconfigs,verbs=*
 //+kubebuilder:rbac:groups="oauth.openshift.io",resources=oauthclients,verbs=get;list;watch;create;delete;patch;update
+//+kubebuilder:rbac:groups=argoproj.io,resources=notificationsconfigurations;notificationsconfigurations/finalizers,verbs=*
+//+kubebuilder:rbac:groups="apiregistration.k8s.io",resources="apiservices",verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -117,7 +122,7 @@ func (r *ReconcileArgoCD) Reconcile(ctx context.Context, request ctrl.Request) (
 	// Match the value of labelSelector from ReconcileArgoCD to labels from the argocd instance
 	if !labelSelector.Matches(labels.Set(argocd.Labels)) {
 		reqLogger.Info(fmt.Sprintf("the ArgoCD instance '%s' does not match the label selector '%s' and skipping for reconciliation", request.NamespacedName, r.LabelSelector))
-		return reconcile.Result{}, fmt.Errorf("Error: failed to reconcile ArgoCD instance: '%s'", request.NamespacedName)
+		return reconcile.Result{}, fmt.Errorf("error: failed to reconcile ArgoCD instance: '%s'", request.NamespacedName)
 	}
 
 	newPhase := argocd.Status.Phase
@@ -169,6 +174,10 @@ func (r *ReconcileArgoCD) Reconcile(ctx context.Context, request ctrl.Request) (
 				return reconcile.Result{}, fmt.Errorf("failed to remove resources from sourceNamespaces, error: %w", err)
 			}
 
+			if err := r.removeUnmanagedApplicationSetSourceNamespaceResources(argocd); err != nil {
+				return reconcile.Result{}, fmt.Errorf("failed to remove resources from applicationSetSourceNamespaces, error: %w", err)
+			}
+
 			if err := r.removeDeletionFinalizer(argocd); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -196,6 +205,10 @@ func (r *ReconcileArgoCD) Reconcile(ctx context.Context, request ctrl.Request) (
 	}
 
 	if err = r.setManagedSourceNamespaces(argocd); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if err = r.setManagedApplicationSetSourceNamespaces(argocd); err != nil {
 		return reconcile.Result{}, err
 	}
 

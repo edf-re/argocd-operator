@@ -21,13 +21,14 @@ import (
 	json "encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 
 	argoproj "github.com/argoproj-labs/argocd-operator/api/v1beta1"
 	"github.com/argoproj-labs/argocd-operator/common"
 	"github.com/argoproj-labs/argocd-operator/controllers/argoutil"
 
 	appsv1 "github.com/openshift/api/apps/v1"
-	oappsv1 "github.com/openshift/api/apps/v1"
+
 	oauthv1 "github.com/openshift/api/oauth/v1"
 	routev1 "github.com/openshift/api/route/v1"
 	template "github.com/openshift/api/template/v1"
@@ -111,7 +112,7 @@ func getKeycloakContainerImage(cr *argoproj.ArgoCD) string {
 
 	if img == "" {
 		img = common.ArgoCDKeycloakImage
-		if IsTemplateAPIAvailable() {
+		if CanUseKeycloakWithTemplate() {
 			img = common.ArgoCDKeycloakImageForOpenShift
 		}
 		defaultImg = true
@@ -123,7 +124,7 @@ func getKeycloakContainerImage(cr *argoproj.ArgoCD) string {
 
 	if tag == "" {
 		tag = common.ArgoCDKeycloakVersion
-		if IsTemplateAPIAvailable() {
+		if CanUseKeycloakWithTemplate() {
 			tag = common.ArgoCDKeycloakVersionForOpenShift
 		}
 		defaultTag = true
@@ -236,6 +237,7 @@ func getKeycloakContainer(cr *argoproj.ArgoCD) corev1.Container {
 			{ContainerPort: 8443, Name: "https", Protocol: "TCP"},
 			{ContainerPort: 8888, Name: "ping", Protocol: "TCP"},
 		},
+		SecurityContext: restrictedContainerSecurityContext(),
 		ReadinessProbe: &corev1.Probe{
 			TimeoutSeconds:      240,
 			InitialDelaySeconds: 120,
@@ -394,7 +396,7 @@ func getKeycloakServiceTemplate(ns string) *corev1.Service {
 	}
 }
 
-func getKeycloakRouteTemplate(ns string) *routev1.Route {
+func getKeycloakRouteTemplate(ns string, cr argoproj.ArgoCD) *routev1.Route {
 	return &routev1.Route{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      map[string]string{"application": "${APPLICATION_NAME}"},
@@ -404,6 +406,7 @@ func getKeycloakRouteTemplate(ns string) *routev1.Route {
 		},
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Route"},
 		Spec: routev1.RouteSpec{
+			Host: getKeycloakOpenshiftHost(cr.Spec.SSO.Keycloak),
 			TLS: &routev1.TLSConfig{
 				Termination: "reencrypt",
 			},
@@ -437,7 +440,7 @@ func newKeycloakTemplate(cr *argoproj.ArgoCD) (template.Template, error) {
 	secretTemplate := getKeycloakSecretTemplate(ns)
 	deploymentConfigTemplate := getKeycloakDeploymentConfigTemplate(cr)
 	serviceTemplate := getKeycloakServiceTemplate(ns)
-	routeTemplate := getKeycloakRouteTemplate(ns)
+	routeTemplate := getKeycloakRouteTemplate(ns, *cr)
 
 	configMap, err := json.Marshal(configMapTemplate)
 	if err != nil {
@@ -534,7 +537,7 @@ func newKeycloakIngress(cr *argoproj.ArgoCD) *networkingv1.Ingress {
 			},
 			Rules: []networkingv1.IngressRule{
 				{
-					Host: keycloakIngressHost,
+					Host: getKeycloakIngressHost(cr.Spec.SSO.Keycloak),
 					IngressRuleValue: networkingv1.IngressRuleValue{
 						HTTP: &networkingv1.HTTPIngressRuleValue{
 							Paths: []networkingv1.HTTPIngressPath{
@@ -626,6 +629,7 @@ func newKeycloakDeployment(cr *argoproj.ArgoCD) *k8sappsv1.Deployment {
 								{Name: "http", ContainerPort: httpPort},
 								{Name: "https", ContainerPort: portTLS},
 							},
+							SecurityContext: restrictedContainerSecurityContext(),
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
@@ -910,7 +914,7 @@ func createRealmConfig(cfg *keycloakConfig) ([]byte, error) {
 
 	// Add OpenShift-v4 as Identity Provider only for OpenShift environment.
 	// No Identity Provider is configured by default for non-openshift environments.
-	if IsTemplateAPIAvailable() {
+	if CanUseKeycloakWithTemplate() {
 		baseURL := "https://kubernetes.default.svc.cluster.local"
 		if isProxyCluster() {
 			baseURL = getOpenShiftAPIURL()
@@ -1005,7 +1009,7 @@ func (r *ReconcileArgoCD) updateArgoCDConfiguration(cr *argoproj.ArgoCD, kRouteU
 	}
 
 	// Create openshift OAuthClient
-	if IsTemplateAPIAvailable() {
+	if CanUseKeycloakWithTemplate() {
 		oAuthClient := &oauthv1.OAuthClient{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "OAuthClient",
@@ -1095,7 +1099,7 @@ func (r *ReconcileArgoCD) updateArgoCDConfiguration(cr *argoproj.ArgoCD, kRouteU
 }
 
 // HandleKeycloakPodDeletion resets the Realm Creation Status to false when keycloak pod is deleted.
-func handleKeycloakPodDeletion(dc *oappsv1.DeploymentConfig) error {
+func handleKeycloakPodDeletion(dc *appsv1.DeploymentConfig) error {
 	cfg, err := config.GetConfig()
 	if err != nil {
 		log.Error(err, "unable to get k8s config")
@@ -1128,7 +1132,7 @@ func handleKeycloakPodDeletion(dc *oappsv1.DeploymentConfig) error {
 func (r *ReconcileArgoCD) reconcileKeycloakConfiguration(cr *argoproj.ArgoCD) error {
 
 	// TemplateAPI is available, Install keycloak using openshift templates.
-	if IsTemplateAPIAvailable() {
+	if CanUseKeycloakWithTemplate() {
 		err := r.reconcileKeycloakForOpenShift(cr)
 		if err != nil {
 			return err
@@ -1146,7 +1150,7 @@ func (r *ReconcileArgoCD) reconcileKeycloakConfiguration(cr *argoproj.ArgoCD) er
 func deleteKeycloakConfiguration(cr *argoproj.ArgoCD) error {
 
 	// If SSO is installed using OpenShift templates.
-	if IsTemplateAPIAvailable() {
+	if CanUseKeycloakWithTemplate() {
 		err := deleteKeycloakConfigForOpenShift(cr)
 		if err != nil {
 			return err
@@ -1316,7 +1320,7 @@ func (r *ReconcileArgoCD) reconcileKeycloakForOpenShift(cr *argoproj.ArgoCD) err
 		}
 	}
 
-	existingDC := &oappsv1.DeploymentConfig{
+	existingDC := &appsv1.DeploymentConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      defaultKeycloakIdentifier,
 			Namespace: cr.Namespace,
@@ -1327,11 +1331,21 @@ func (r *ReconcileArgoCD) reconcileKeycloakForOpenShift(cr *argoproj.ArgoCD) err
 		log.Error(err, fmt.Sprintf("Keycloak Deployment not found or being created for ArgoCD %s in namespace %s",
 			cr.Name, cr.Namespace))
 	} else {
+		changed := false
 		// Handle Image upgrades
 		desiredImage := getKeycloakContainerImage(cr)
 		if existingDC.Spec.Template.Spec.Containers[0].Image != desiredImage {
 			existingDC.Spec.Template.Spec.Containers[0].Image = desiredImage
+			changed = true
+		}
 
+		desiredSecurityContext := restrictedContainerSecurityContext()
+		if !reflect.DeepEqual(existingDC.Spec.Template.Spec.Containers[0].SecurityContext, desiredSecurityContext) {
+			existingDC.Spec.Template.Spec.Containers[0].SecurityContext = desiredSecurityContext
+			changed = true
+		}
+
+		if changed {
 			err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 				return r.Client.Update(context.TODO(), existingDC)
 			})
@@ -1430,11 +1444,21 @@ func (r *ReconcileArgoCD) reconcileKeycloak(cr *argoproj.ArgoCD) error {
 		log.Error(err, fmt.Sprintf("Keycloak Deployment not found or being created for ArgoCD %s in namespace %s",
 			cr.Name, cr.Namespace))
 	} else {
+		changed := false
 		// Handle Image upgrades
 		desiredImage := getKeycloakContainerImage(cr)
 		if existingDeployment.Spec.Template.Spec.Containers[0].Image != desiredImage {
 			existingDeployment.Spec.Template.Spec.Containers[0].Image = desiredImage
+			changed = true
+		}
 
+		desiredSecurityContext := restrictedContainerSecurityContext()
+		if !reflect.DeepEqual(existingDeployment.Spec.Template.Spec.Containers[0].SecurityContext, desiredSecurityContext) {
+			existingDeployment.Spec.Template.Spec.Containers[0].SecurityContext = desiredSecurityContext
+			changed = true
+		}
+
+		if changed {
 			err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 				return r.Client.Update(context.TODO(), existingDeployment)
 			})
@@ -1489,4 +1513,19 @@ func (r *ReconcileArgoCD) reconcileKeycloak(cr *argoproj.ArgoCD) error {
 	}
 
 	return nil
+}
+
+func restrictedContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{
+				"ALL",
+			},
+		},
+		AllowPrivilegeEscalation: boolPtr(false),
+		RunAsNonRoot:             boolPtr(true),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: "RuntimeDefault",
+		},
+	}
 }

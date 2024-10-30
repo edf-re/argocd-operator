@@ -17,6 +17,7 @@ package argocd
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -92,15 +93,14 @@ func (r *ReconcileArgoCD) reconcileIngresses(cr *argoproj.ArgoCD) error {
 // reconcileArgoServerIngress will ensure that the ArgoCD Server Ingress is present.
 func (r *ReconcileArgoCD) reconcileArgoServerIngress(cr *argoproj.ArgoCD) error {
 	ingress := newIngressWithSuffix("server", cr)
-	if argoutil.IsObjectFound(r.Client, cr.Namespace, ingress.Name, ingress) {
-		if !cr.Spec.Server.Ingress.Enabled {
+	existingIngress := newIngressWithSuffix("server", cr)
+	objectFound := argoutil.IsObjectFound(r.Client, cr.Namespace, ingress.Name, existingIngress)
+
+	if !cr.Spec.Server.Ingress.Enabled {
+		if objectFound {
 			// Ingress exists but enabled flag has been set to false, delete the Ingress
 			return r.Client.Delete(context.TODO(), ingress)
 		}
-		return nil // Ingress found and enabled, do nothing
-	}
-
-	if !cr.Spec.Server.Ingress.Enabled {
 		return nil // Ingress not enabled, move along...
 	}
 
@@ -158,7 +158,30 @@ func (r *ReconcileArgoCD) reconcileArgoServerIngress(cr *argoproj.ArgoCD) error 
 	if len(cr.Spec.Server.Ingress.TLS) > 0 {
 		ingress.Spec.TLS = cr.Spec.Server.Ingress.TLS
 	}
-
+	if objectFound {
+		changed := false
+		// If Ingress found and enabled, make sure the ingressClassName is up-to-date
+		if existingIngress.Spec.IngressClassName != cr.Spec.Server.Ingress.IngressClassName {
+			changed = true
+			existingIngress.Spec.IngressClassName = cr.Spec.Server.Ingress.IngressClassName
+		}
+		if !reflect.DeepEqual(cr.Spec.Server.Ingress.Annotations, existingIngress.ObjectMeta.Annotations) {
+			changed = true
+			existingIngress.ObjectMeta.Annotations = cr.Spec.Server.Ingress.Annotations
+		}
+		if !reflect.DeepEqual(ingress.Spec.Rules, existingIngress.Spec.Rules) {
+			changed = true
+			existingIngress.Spec.Rules = ingress.Spec.Rules
+		}
+		if !reflect.DeepEqual(ingress.Spec.TLS, existingIngress.Spec.TLS) {
+			changed = true
+			existingIngress.Spec.TLS = ingress.Spec.TLS
+		}
+		if changed {
+			return r.Client.Update(context.TODO(), existingIngress)
+		}
+		return nil // Ingress with no changes to apply, do nothing
+	}
 	if err := controllerutil.SetControllerReference(cr, ingress, r.Scheme); err != nil {
 		return err
 	}
@@ -244,77 +267,23 @@ func (r *ReconcileArgoCD) reconcileArgoServerGRPCIngress(cr *argoproj.ArgoCD) er
 func (r *ReconcileArgoCD) reconcileGrafanaIngress(cr *argoproj.ArgoCD) error {
 	ingress := newIngressWithSuffix("grafana", cr)
 	if argoutil.IsObjectFound(r.Client, cr.Namespace, ingress.Name, ingress) {
+		//nolint:staticcheck
 		if !cr.Spec.Grafana.Enabled || !cr.Spec.Grafana.Ingress.Enabled {
 			// Ingress exists but enabled flag has been set to false, delete the Ingress
 			return r.Client.Delete(context.TODO(), ingress)
 		}
+		log.Info(grafanaDeprecatedWarning)
 		return nil // Ingress found and enabled, do nothing
 	}
 
+	//nolint:staticcheck
 	if !cr.Spec.Grafana.Enabled || !cr.Spec.Grafana.Ingress.Enabled {
 		return nil // Grafana itself or Ingress not enabled, move along...
 	}
 
-	// Add default annotations
-	atns := make(map[string]string)
-	atns[common.ArgoCDKeyIngressSSLRedirect] = "true"
-	atns[common.ArgoCDKeyIngressBackendProtocol] = "HTTP"
+	log.Info(grafanaDeprecatedWarning)
 
-	// Override default annotations if specified
-	if len(cr.Spec.Grafana.Ingress.Annotations) > 0 {
-		atns = cr.Spec.Grafana.Ingress.Annotations
-	}
-
-	ingress.ObjectMeta.Annotations = atns
-
-	ingress.Spec.IngressClassName = cr.Spec.Grafana.Ingress.IngressClassName
-
-	pathType := networkingv1.PathTypeImplementationSpecific
-	// Add rules
-	ingress.Spec.Rules = []networkingv1.IngressRule{
-		{
-			Host: getGrafanaHost(cr),
-			IngressRuleValue: networkingv1.IngressRuleValue{
-				HTTP: &networkingv1.HTTPIngressRuleValue{
-					Paths: []networkingv1.HTTPIngressPath{
-						{
-							Path: getPathOrDefault(cr.Spec.Grafana.Ingress.Path),
-							Backend: networkingv1.IngressBackend{
-								Service: &networkingv1.IngressServiceBackend{
-									Name: nameWithSuffix("grafana", cr),
-									Port: networkingv1.ServiceBackendPort{
-										Name: "http",
-									},
-								},
-							},
-							PathType: &pathType,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Add TLS options
-	ingress.Spec.TLS = []networkingv1.IngressTLS{
-		{
-			Hosts: []string{
-				cr.Name,
-				getGrafanaHost(cr),
-			},
-			SecretName: common.ArgoCDSecretName,
-		},
-	}
-
-	// Allow override of TLS options if specified
-	if len(cr.Spec.Grafana.Ingress.TLS) > 0 {
-		ingress.Spec.TLS = cr.Spec.Grafana.Ingress.TLS
-	}
-
-	if err := controllerutil.SetControllerReference(cr, ingress, r.Scheme); err != nil {
-		return err
-	}
-	return r.Client.Create(context.TODO(), ingress)
+	return nil
 }
 
 // reconcilePrometheusIngress will ensure that the Prometheus Ingress is present.
@@ -419,10 +388,15 @@ func (r *ReconcileArgoCD) reconcileApplicationSetControllerIngress(cr *argoproj.
 	ingress.ObjectMeta.Annotations = atns
 
 	pathType := networkingv1.PathTypeImplementationSpecific
+	httpServerHost, err := getApplicationSetHTTPServerHost(cr)
+	if err != nil {
+		return err
+	}
+
 	// Add rules
 	ingress.Spec.Rules = []networkingv1.IngressRule{
 		{
-			Host: getApplicationSetHTTPServerHost(cr),
+			Host: httpServerHost,
 			IngressRuleValue: networkingv1.IngressRuleValue{
 				HTTP: &networkingv1.HTTPIngressRuleValue{
 					Paths: []networkingv1.HTTPIngressPath{
